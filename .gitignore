@@ -1,0 +1,25 @@
+# Machine-specific settings, secrets, runtime output
+.env
+.env.*
+!.env.example
+config.local.toml
+*.pem
+*.key
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+data/
+logs/
+*.sqlite*
+*.db
+*.log
+.DS_Store
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,7 @@
+# Public example values only. Copy to config.local.toml for local overrides.
+[gateway]
+host = "127.0.0.1"
+tcp_port = 9000
+command_timeout = 3.0
+first_message_timeout = 5.0
+max_connections = 128
