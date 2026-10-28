@@ -20,8 +20,8 @@ class Light(TcpDevice):
         return False
 
 
-async def run_light(host: str, port: int, device_id: str) -> None:
-    await Light(device_id).run(host, port)
+async def run_light(host: str, port: int, device_id: str, heartbeat_interval: float = 5.0) -> None:
+    await Light(device_id).run(host, port, heartbeat_interval)
 
 
 def main() -> None:
