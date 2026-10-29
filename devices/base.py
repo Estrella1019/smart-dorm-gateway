@@ -8,6 +8,17 @@ from shared.config import load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
 
 
+RETRYABLE_ERRORS = (OSError, TimeoutError, asyncio.IncompleteReadError, ProtocolError)
+
+
+def _raise_if_cancelling() -> None:
+    # Python 3.11's wait_for can swallow a cancel that races with completion;
+    # honour the pending request so a stopped device doesn't keep reconnecting.
+    task = asyncio.current_task()
+    if task and task.cancelling():
+        raise asyncio.CancelledError
+
+
 class TcpDevice:
     device_type = ""
 
@@ -15,6 +26,7 @@ class TcpDevice:
         self.device_id = device_id
         # The heartbeat task and command loop share one writer; keep frames whole.
         self._send_lock = asyncio.Lock()
+        self.registered = False
 
     def state(self) -> dict:
         raise NotImplementedError
@@ -44,6 +56,8 @@ class TcpDevice:
             reply = await asyncio.wait_for(read_message(reader), 5)
             if reply["type"] != "REGISTERED":
                 raise ProtocolError(f"registration rejected: {reply['payload']}")
+            self.registered = True
+            _raise_if_cancelling()
             print(f"Simulated {self.device_type} {self.device_id} connected; "
                   f"state={json.dumps(self.state())}", flush=True)
             if heartbeat_interval > 0:
@@ -66,6 +80,26 @@ class TcpDevice:
                 await asyncio.gather(heartbeat, return_exceptions=True)
             await close_writer(writer)
 
+    async def run_forever(self, host: str, port: int, heartbeat_interval: float = 5.0,
+                          retry_initial: float = 1.0, retry_max: float = 30.0) -> None:
+        """Reconnect with exponential backoff; in-memory state survives reconnects."""
+        delay = retry_initial
+        while True:
+            self.registered = False
+            reason = "connection closed"
+            try:
+                await self.run(host, port, heartbeat_interval)
+            except RETRYABLE_ERRORS as exc:
+                reason = str(exc) or type(exc).__name__
+            _raise_if_cancelling()
+            if self.registered:
+                # The last attempt got through, so start the backoff over.
+                delay = retry_initial
+            print(f"{self.device_type} {self.device_id} disconnected ({reason}); "
+                  f"retrying in {delay:g}s", flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, retry_max)
+
 
 def run_device_cli(device_class: type[TcpDevice], description: str, default_id: str) -> None:
     parser = argparse.ArgumentParser(description=description)
@@ -74,12 +108,20 @@ def run_device_cli(device_class: type[TcpDevice], description: str, default_id: 
     parser.add_argument("--device-id", default=default_id)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0,
                         help="Seconds between heartbeats; 0 disables them")
+    parser.add_argument("--retry-max", type=float, default=30.0,
+                        help="Longest wait between reconnect attempts, in seconds")
+    parser.add_argument("--no-reconnect", action="store_true",
+                        help="Exit on the first disconnect instead of reconnecting")
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
         device = device_class(args.device_id)
-        asyncio.run(device.run(args.host or settings.host, settings.tcp_port,
-                               args.heartbeat_interval))
+        host = args.host or settings.host
+        if args.no_reconnect:
+            asyncio.run(device.run(host, settings.tcp_port, args.heartbeat_interval))
+        else:
+            asyncio.run(device.run_forever(host, settings.tcp_port, args.heartbeat_interval,
+                                           retry_max=args.retry_max))
     except KeyboardInterrupt:
         pass
     except (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError) as exc:

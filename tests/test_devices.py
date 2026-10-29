@@ -68,3 +68,57 @@ class HeartbeatTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.005)
         await asyncio.sleep(0.2)
         self.assertEqual(self.heartbeats, [])
+
+
+class ReconnectTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.gateway = None
+        self.task = None
+        # Reserve a free port, then release it so tests can start and stop gateways on it.
+        probe = Gateway(Settings(tcp_port=0))
+        await probe.start()
+        self.port = probe.address[1]
+        await probe.close()
+
+    async def asyncTearDown(self):
+        if self.task:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+        if self.gateway:
+            await self.gateway.close()
+
+    async def start_gateway(self):
+        self.gateway = Gateway(Settings(tcp_port=self.port))
+        await self.gateway.start()
+
+    async def wait_registered(self):
+        async with asyncio.timeout(3):
+            while not self.gateway.list_devices():
+                await asyncio.sleep(0.01)
+        return self.gateway.list_devices()[0]
+
+    def start_light(self, light):
+        self.task = asyncio.create_task(light.run_forever(
+            "127.0.0.1", self.port, heartbeat_interval=0, retry_initial=0.05, retry_max=0.2))
+
+    async def test_reconnects_after_gateway_restart_and_keeps_state(self):
+        await self.start_gateway()
+        light = Light("light_001")
+        self.start_light(light)
+        await self.wait_registered()
+        result = await request("127.0.0.1", self.port, make_message(
+            "COMMAND", {"action": "set_power", "value": True}, device_id="light_001"))
+        self.assertEqual(result["payload"]["status"], "success")
+
+        await self.gateway.close()
+        await self.start_gateway()
+        device = await self.wait_registered()
+        self.assertEqual(device["state"], {"power": True})
+
+    async def test_keeps_retrying_until_gateway_starts(self):
+        self.start_light(Light("light_001"))
+        await asyncio.sleep(0.3)
+        self.assertFalse(self.task.done())
+        await self.start_gateway()
+        device = await self.wait_registered()
+        self.assertEqual(device["device_id"], "light_001")
