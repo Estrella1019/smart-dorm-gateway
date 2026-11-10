@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+from collections import OrderedDict
 
 from shared.config import load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
@@ -21,12 +22,16 @@ def _raise_if_cancelling() -> None:
 
 class TcpDevice:
     device_type = ""
+    dedup_size = 100
 
     def __init__(self, device_id: str):
         self.device_id = device_id
         # The heartbeat task and command loop share one writer; keep frames whole.
         self._send_lock = asyncio.Lock()
         self.registered = False
+        # request_id -> result payload, oldest first. Kept across reconnects so a
+        # command resent after a lost acknowledgment is answered, not re-executed.
+        self._recent_results: OrderedDict[str, dict] = OrderedDict()
 
     def state(self) -> dict:
         raise NotImplementedError
@@ -34,6 +39,18 @@ class TcpDevice:
     def execute(self, action: object, value: object) -> bool:
         """Apply one command to the in-memory state; return False to reject it."""
         raise NotImplementedError
+
+    def handle_command(self, request_id: str, payload: dict) -> tuple[dict, bool]:
+        """Return (result payload, is_duplicate); a repeated request_id is not re-executed."""
+        cached = self._recent_results.get(request_id)
+        if cached is not None:
+            return dict(cached), True
+        status = "success" if self.execute(payload.get("action"), payload.get("value")) else "failed"
+        result = {"status": status, "state": self.state()}
+        self._recent_results[request_id] = result
+        if len(self._recent_results) > self.dedup_size:
+            self._recent_results.popitem(last=False)
+        return dict(result), False
 
     async def _send(self, writer: asyncio.StreamWriter, message: dict) -> None:
         async with self._send_lock:
@@ -69,10 +86,13 @@ class TcpDevice:
                 payload = message["payload"]
                 if not message.get("request_id"):
                     raise ProtocolError("missing request_id")
-                status = "success" if self.execute(payload.get("action"), payload.get("value")) else "failed"
-                result = make_message("COMMAND_RESULT", {"status": status, "state": self.state()},
+                result_payload, duplicate = self.handle_command(message["request_id"], payload)
+                result = make_message("COMMAND_RESULT", result_payload,
                                       device_id=self.device_id, request_id=message["request_id"])
                 await self._send(writer, result)
+                if duplicate:
+                    print(f"duplicate request_id {message['request_id']}; "
+                          "replaying earlier result without executing", flush=True)
                 print(json.dumps(result, ensure_ascii=False), flush=True)
         finally:
             if heartbeat:
