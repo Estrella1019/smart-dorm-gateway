@@ -5,3 +5,7 @@ tcp_port = 9000
 command_timeout = 3.0
 first_message_timeout = 5.0
 max_connections = 128
+
+# UDP sensor listener; heartbeat interval on devices defaults to 5 seconds.
+udp_port = 9001
+heartbeat_timeout = 15.0

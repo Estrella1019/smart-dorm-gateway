@@ -34,6 +34,8 @@ class DeviceSession:
         """将设备标记为离线，保留最后已知 state 和 last_seen，清空底层连接。"""
         was_online = self.online
         self.online = False
+        if self.writer is not None:
+            self.writer.close()
         self.writer = None
         return was_online
 
@@ -60,6 +62,8 @@ class DeviceRegistry:
             # 注意：如果原有单元测试强制要求在线重复注册抛 ValueError，保留下面这行：
             raise ValueError("device_id already connected")
 
+        if existing is not None and (existing.protocol != session.protocol or existing.device_type != session.device_type):
+            raise ValueError("device identity/type collision")
         if existing is not None:
             # 继承离线前的历史状态（如果新注册未携带完整状态）和排队锁
             if not session.state and existing.state:
@@ -83,6 +87,8 @@ class DeviceRegistry:
             )
             self._devices[device_id] = session
         else:
+            if session.protocol != "UDP" or session.device_type != device_type:
+                raise ValueError("device identity/type collision")
             session.protocol = "UDP"
             session.touch(state)
         return session

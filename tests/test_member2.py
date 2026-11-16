@@ -36,6 +36,8 @@ class Member2ReliableTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_queuing(self):
         """排队测试：修改现有逻辑后，同设备的多个命令不会再报 busy，而是排队执行。"""
+        from dataclasses import replace
+        self.gateway.settings = replace(self.gateway.settings, command_timeout=2.0)
         reader, writer = await self._mock_device()
         
         # 并发提交两条命令
@@ -48,6 +50,7 @@ class Member2ReliableTests(unittest.IsolatedAsyncioTestCase):
         
         # 此时任务2处于排队等待第一条命令执行完成
         await asyncio.sleep(0.05)
+        self.assertFalse(task2.done())
         
         # 模拟设备回复第一条
         await send_message(writer, make_message("COMMAND_RESULT", {

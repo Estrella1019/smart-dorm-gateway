@@ -269,3 +269,7 @@ Additional technical documentation is currently written in Chinese:
 Keep changes focused and include tests for new behavior. Changes to shared message formats, configuration fields, or service contracts should also update the corresponding documentation and examples.
 
 Run the test suite before submitting a pull request. Local configuration, credentials, logs, and generated databases should remain outside version control.
+
+## Integration branch
+
+See [integration runbook](docs/integration.md) for the current TCP light/door-lock and UDP sensor demonstration, lifecycle fixes and verification scope.

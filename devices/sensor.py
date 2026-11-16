@@ -83,13 +83,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Software-only UDP temperature/humidity sensor")
     parser.add_argument("--config")
     parser.add_argument("--host", help="Gateway address; overrides configuration host")
-    parser.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
+    parser.add_argument("--udp-port", type=int, default=None)
     parser.add_argument("--device-id", default="sensor_001")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between reports")
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
-        asyncio.run(run_sensor(args.host or settings.host, args.udp_port,
+        asyncio.run(run_sensor(args.host or settings.host, args.udp_port if args.udp_port is not None else settings.udp_port,
                                args.device_id, args.interval))
     except KeyboardInterrupt:
         pass

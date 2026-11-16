@@ -9,7 +9,8 @@ from uuid import uuid4
 from shared.config import Settings, load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
 from gateway.events import EventBus
-from gateway.registry import DeviceRegistry, DeviceSession, utc_now
+from gateway.registry import DeviceRegistry, DeviceSession
+from gateway.udp import SensorReceiver
 
 LOG = logging.getLogger(__name__)
 
@@ -23,16 +24,22 @@ class Gateway:
         self._clients: set[asyncio.Task] = set()
         self._pending: dict[str, tuple[DeviceSession, asyncio.Future]] = {}
         self._monitor_task: asyncio.Task | None = None
-        
+
         # 组员 2：可靠控制配置
         self.max_retries = 2
-        self.heartbeat_timeout = 5.0  # 心跳超时时间 (秒)
+        self.heartbeat_timeout = self.settings.heartbeat_timeout  # 心跳超时时间 (秒)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
             self._handle_client, self.settings.host, self.settings.tcp_port,
             limit=131072,
         )
+        try:
+            self._udp, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda: SensorReceiver(self), local_addr=(self.settings.host, self.settings.udp_port))
+        except BaseException:
+            await self.close()
+            raise
         self._monitor_task = asyncio.create_task(self._monitor_heartbeats())
 
     @property
@@ -49,13 +56,18 @@ class Gateway:
     async def close(self) -> None:
         if self._monitor_task:
             self._monitor_task.cancel()
+        if getattr(self, "_udp", None):
+            self._udp.close()
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
         tasks = list(self._clients)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self._monitor_task:
+            await asyncio.gather(self._monitor_task, return_exceptions=True)
+        if self._server:
+            await self._server.wait_closed()
 
     def list_devices(self) -> list[dict]:
         return self.registry.list_devices()
@@ -82,15 +94,19 @@ class Gateway:
         await send_message(session.writer, message)
 
     async def submit_command(self, device_id: str, action: str, value: bool) -> dict:
-        if action != "set_power" or type(value) is not bool:
-            raise ProtocolError("bootstrap supports set_power with a boolean value only")
-        
+        if not isinstance(action, str) or action not in {"set_power", "set_locked"} or type(value) is not bool:
+            raise ProtocolError("action must be set_power/set_locked with a boolean value")
+
         request_id = uuid4().hex
         session = self.registry.get(device_id)
-        
+
         if session is None or not session.online:
             return {"request_id": request_id, "status": "failed", "reason": "device_offline"}
-            
+
+        expected = {"light": "set_power", "door_lock": "set_locked"}.get(session.device_type)
+        if action != expected:
+            raise ProtocolError("action does not match device type")
+
         # 组员 2 改造：利用 command_lock 实现同设备串行排队
         async with session.command_lock:
             # 再次检查设备是否在线（防止排队期间掉线）
@@ -100,21 +116,21 @@ class Gateway:
             future = asyncio.get_running_loop().create_future()
             self._pending[request_id] = (session, future)
             self.events.emit("command.submitted", device_id=device_id, request_id=request_id)
-            
+
             cmd_msg = make_message(
                 "COMMAND", {"action": action, "value": value},
                 device_id=device_id, request_id=request_id
             )
 
             result = {"status": "unknown", "reason": "confirmation_timeout"}
-            
+
             try:
                 # 组员 2 改造：使用相同的 request_id 进行有限重试
                 for attempt in range(1, self.max_retries + 2):
                     if not session.online or session.writer is None:
                         result = {"status": "unknown", "reason": "device_disconnected"}
                         break
-                        
+
                     try:
                         await send_message(session.writer, cmd_msg)
                         self.events.emit("command.sent", device_id=device_id, request_id=request_id, attempt=attempt)
@@ -129,12 +145,12 @@ class Gateway:
                     except TimeoutError:
                         self.events.emit("command.timeout_retry", device_id=device_id, request_id=request_id, attempt=attempt)
                         continue
-                        
+
             finally:
                 self._pending.pop(request_id, None)
                 if not future.done():
                     future.cancel()
-                    
+
             result = {"request_id": request_id, **result}
             self.events.emit("command.completed", device_id=device_id, **result)
             return result
@@ -151,19 +167,16 @@ class Gateway:
             if message["type"] == "REGISTER":
                 device_id = message.get("device_id")
                 payload = message["payload"]
-                if not device_id or payload.get("device_type") != "light":
-                    raise ProtocolError("registration requires device_id and device_type=light")
-                state = payload.get("state", {})
-                if not isinstance(state, dict) or type(state.get("power")) is not bool:
-                    raise ProtocolError("registration requires state.power boolean")
-                
-                # 组员 2：使用你的 registry 的软状态。若未修改 registry.py，此处不报错。
-                session = DeviceSession(device_id, "light", writer, {"power": state["power"]})
+                device_type = payload.get("device_type")
+                if not device_id or device_type not in ("light", "door_lock"):
+                    raise ProtocolError("unsupported TCP device type")
+                state = self.validate_state(device_type, payload.get("state"))
+                session = DeviceSession(device_id, device_type, writer, state)
                 try:
                     self.registry.register(session)
                 except ValueError as exc:
                     raise ProtocolError(str(exc)) from exc
-                    
+
                 await send_message(writer, make_message("REGISTERED", device_id=device_id))
                 self.events.emit("device.connected", device_id=device_id)
                 await self._read_device(reader, session)
@@ -201,39 +214,34 @@ class Gateway:
             message = await read_message(reader)
             if message.get("device_id") != session.device_id:
                 raise ProtocolError("device_id does not match connection")
-            
-            # 组员 2 改造：适配含有 touch 的新版 registry.py，若没有则兼容旧版
-            if hasattr(session, "touch"):
-                session.touch()
-            else:
-                session.last_seen = utc_now()
-                
-            kind = message["type"]
-            payload = message["payload"]
-            
+
+            if not session.online or self.registry.get(session.device_id) is not session:
+                raise ProtocolError("expired connection; register again")
+            kind, payload = message["type"], message["payload"]
+            if kind == "COMMAND_RESULT":
+                pending = self._pending.get(message.get("request_id"))
+                if not pending or pending[0] is not session or pending[1].done():
+                    continue
+                if payload.get("status") not in ("success", "failed"):
+                    raise ProtocolError("invalid command result status")
             if kind in {"REPORT", "COMMAND_RESULT"}:
-                state = payload.get("state")
-                if not isinstance(state, dict) or type(state.get("power")) is not bool:
-                    raise ProtocolError("state.power must be boolean")
-                    
-                if hasattr(session, "touch"):
-                    session.touch(state)
-                session.state = {"power": state["power"]}
-                self.events.emit("device.state", device_id=session.device_id, state=dict(session.state))
-                
+                state = self.validate_state(session.device_type, payload.get("state"))
+                session.touch(state)
+                self.events.emit("device.state", device_id=session.device_id, state=dict(state))
                 if kind == "COMMAND_RESULT":
-                    if payload.get("status") not in ("success", "failed"):
-                        raise ProtocolError("invalid command result status")
-                    pending = self._pending.get(message.get("request_id"))
-                    if not pending or pending[0] is not session:
-                        continue
-                    if not pending[1].done():
-                        pending[1].set_result({"status": payload["status"], "state": dict(state)})
-                        
+                    pending[1].set_result({"status": payload["status"], "state": dict(state)})
             elif kind == "HEARTBEAT":
+                session.touch()
                 self.events.emit("device.heartbeat", device_id=session.device_id)
             else:
                 raise ProtocolError("unexpected device message")
+
+    @staticmethod
+    def validate_state(device_type, state):
+        field = {"light": "power", "door_lock": "locked"}[device_type]
+        if not isinstance(state, dict) or type(state.get(field)) is not bool:
+            raise ProtocolError(f"state.{field} must be boolean")
+        return {field: state[field]}
 
 
 async def run(settings: Settings) -> None:

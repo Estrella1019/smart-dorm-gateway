@@ -9,6 +9,8 @@ import tomllib
 class Settings:
     host: str = "127.0.0.1"
     tcp_port: int = 9000
+    udp_port: int = 9001
+    heartbeat_timeout: float = 15.0
     command_timeout: float = 3.0
     first_message_timeout: float = 5.0
     max_connections: int = 128
@@ -32,7 +34,9 @@ def load_settings(path: str | None = None) -> Settings:
         raise ValueError("host must be a non-empty string")
     if type(result.tcp_port) is not int or not 1 <= result.tcp_port <= 65535:
         raise ValueError("tcp_port must be 1..65535")
-    for name in ("command_timeout", "first_message_timeout"):
+    if type(result.udp_port) is not int or not 0 <= result.udp_port <= 65535:
+        raise ValueError("udp_port must be 0..65535")
+    for name in ("command_timeout", "first_message_timeout", "heartbeat_timeout"):
         value = getattr(result, name)
         if type(value) not in (int, float) or not 0.1 <= value <= 120:
             raise ValueError(f"{name} must be 0.1..120 seconds")
