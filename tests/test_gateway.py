@@ -40,7 +40,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def wait_online(self, expected=True):
         async with asyncio.timeout(2):
-            while bool(self.gateway.list_devices()) != expected:
+            while True:
+                devices = self.gateway.list_devices()
+                # 检查列表中是否还有处于 online=True 状态的设备
+                # (兼顾了列表为空，以及列表存在但全被标记为软离线 online=False 的情况)
+                has_online_device = any(d.get("online", True) for d in devices)
+                if has_online_device == expected:
+                    break
                 await asyncio.sleep(0.005)
 
     async def test_real_light_end_to_end(self):
@@ -82,16 +88,31 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_online(False)
 
     async def test_busy_device_is_rejected(self):
+        # 需求已变更为排队逻辑，此处验证同设备多条命令会排队执行
         reader, writer, _ = await self.register()
         first = asyncio.create_task(self.control())
         self.tasks.append(first)
-        command = await read_message(reader)
-        second = await self.control(value=False)
-        self.assertEqual(second["payload"]["reason"], "device_busy")
+        command1 = await read_message(reader)
+        
+        # 提交第二条命令，它不会再返回 busy，而是进入排队队列
+        second = asyncio.create_task(self.control(value=False))
+        self.tasks.append(second)
+        
+        # 网关收到设备的第一次确认
         await send_message(writer, make_message("COMMAND_RESULT", {
             "status": "success", "state": {"power": True}}, device_id="light_001",
-            request_id=command["request_id"]))
+            request_id=command1["request_id"]))
+        
         self.assertEqual((await first)["payload"]["status"], "success")
+        
+        # 第一条完成后，第二条才会发给设备
+        command2 = await read_message(reader)
+        await send_message(writer, make_message("COMMAND_RESULT", {
+            "status": "success", "state": {"power": False}}, device_id="light_001",
+            request_id=command2["request_id"]))
+            
+        self.assertEqual((await second)["payload"]["status"], "success")
+
 
     async def test_other_device_cannot_acknowledge_command(self):
         reader, _, _ = await self.register("light_001")
