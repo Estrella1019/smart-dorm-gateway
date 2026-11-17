@@ -4,11 +4,12 @@ import asyncio
 from pathlib import Path
 from aiohttp import web
 from gateway.server import Gateway
+from gateway.storage import EventLogStore, attach_event_log
 from shared.config import load_settings
 from shared.protocol import ProtocolError
 
 
-def create_app(gateway):
+def create_app(gateway, log_store: EventLogStore | None = None):
     app = web.Application(client_max_size=4096)
     sockets = set()
     known = {}
@@ -68,23 +69,45 @@ def create_app(gateway):
             await asyncio.gather(task, return_exceptions=True)
         return ws
 
+    async def logs(request):
+        if log_store is None:
+            return web.json_response({'error': 'logging disabled'}, status=503)
+        request_id = request.rel_url.query.get('request_id')
+        if request_id:
+            rows = log_store.query_by_request_id(request_id)
+        else:
+            limit = min(int(request.rel_url.query.get('limit', 50)), 200)
+            rows = log_store.query_recent(
+                limit=limit,
+                device_id=request.rel_url.query.get('device_id'),
+                event_name=request.rel_url.query.get('event'),
+            )
+        return web.json_response({'events': rows})
+
     app.router.add_get('/', index)
     app.router.add_get('/api/devices', devices)
     app.router.add_post('/api/devices/{device_id}/commands', command)
+    app.router.add_get('/api/logs', logs)
     app.router.add_get('/ws', websocket)
     return app
 
 
 async def run(args):
     gateway = Gateway(load_settings(args.config))
+    log_store = None
+    if args.log_db:
+        log_store = attach_event_log(gateway, EventLogStore(args.log_db))
+        await log_store.start()
     await gateway.start()
-    runner = web.AppRunner(create_app(gateway))
+    runner = web.AppRunner(create_app(gateway, log_store))
     try:
         await runner.setup()
         await web.TCPSite(runner, args.host, args.port).start()
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
+        if log_store:
+            await log_store.close()
         await gateway.close()
 
 
@@ -93,6 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--config')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8080)
+    parser.add_argument('--log-db', default='data/events.sqlite')
     try:
         asyncio.run(run(parser.parse_args()))
     except KeyboardInterrupt:

@@ -10,6 +10,7 @@ from shared.config import Settings, load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
 from gateway.events import EventBus
 from gateway.registry import DeviceRegistry, DeviceSession
+from gateway.storage import EventLogStore, attach_event_log
 from gateway.udp import SensorReceiver
 
 LOG = logging.getLogger(__name__)
@@ -244,20 +245,31 @@ class Gateway:
         return {field: state[field]}
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, log_db: str | None = "data/events.sqlite") -> None:
     gateway = Gateway(settings)
     gateway.events.subscribe(lambda event: LOG.info("%s", json.dumps(event, ensure_ascii=False)))
+    log_store: EventLogStore | None = None
+    if log_db:
+        log_store = attach_event_log(gateway, EventLogStore(log_db))
+        await log_store.start()
     await gateway.start()
     LOG.info("TCP gateway listening on %s", gateway.address)
     try:
         await gateway.serve_forever()
     finally:
+        if log_store:
+            await log_store.close()
         await gateway.close()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smart dorm TCP bootstrap gateway")
     parser.add_argument("--config", help="TOML configuration file")
+    parser.add_argument(
+        "--log-db",
+        default="data/events.sqlite",
+        help="SQLite path for event logs (pass empty string to disable)",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -265,7 +277,7 @@ def main() -> None:
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     try:
-        asyncio.run(run(settings))
+        asyncio.run(run(settings, log_db=args.log_db or None))
     except KeyboardInterrupt:
         pass
 
