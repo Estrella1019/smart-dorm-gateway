@@ -64,3 +64,56 @@
 - 触发方式：先开启(True)再关闭(False)，随后注入第 1 次开启指令的迟到回复（对应 test_integration.py）
 - 预期结果：迟到回复被丢弃，状态保持 False 不被覆盖
 - 实际结果：通过。设备状态保持 {"power": False}。
+
+
+## 四、 联合异常演示与多终端联调实测记录
+
+### 4.1 极端网络异常注入验证（排队、超时重试、无响应与迟到回复）
+本地同时启动 Gateway 与模拟设备 (DoorLock / Light) 开展联合异常场景实测，终端输出如下：
+
+=== 1. 联合验证：模拟设备(组员A)命令去重 + 同设备并发排队 ===
+Simulated door_lock lock_01 connected; state={"locked": true}
+{"version": 1, "type": "COMMAND_RESULT", "payload": {"status": "success", "state": {"locked": false}}, "device_id": "lock_01", "request_id": "60fd2a759e774f2ba46e1c8998cce4d4"}
+{"version": 1, "type": "COMMAND_RESULT", "payload": {"status": "success", "state": {"locked": true}}, "device_id": "lock_01", "request_id": "c5d00596e5d743c4b9e02faf06191e9c"}
+排队执行结果: success -> success | 门锁状态: {'locked': True}
+
+=== 2. 联合验证：首次回复丢失 -> 网关超时重试(同request_id) -> 恢复成功 ===
+首次请求 ID=27a6c5e5... | 重试请求 ID=27a6c5e5... | ID完全一致: True
+重试恢复返回: {'request_id': '27a6c5e5ae7f44e6bc88e6edc9928ba5', 'status': 'success', 'state': {'power': True}}
+
+=== 3. 联合验证：设备无响应 -> 重试耗尽返回 unknown ===
+无响应耗尽返回: {'request_id': '2a56444447ce4615a85c3dc1092db443', 'status': 'unknown', 'reason': 'confirmation_timeout'}
+
+=== 4. 联合验证：迟到回复(Stale ACK)不覆盖当前状态 ===
+注入迟到回复(power=False)后，网关内设备状态仍保持为: {'power': True}
+
+### 4.2 多终端真实进程联调（设备退出重启、网关重启重连与跨进程控制）
+开启 3 个独立终端进程，分别运行网关服务 (python -m gateway.server)、模拟灯设备 (python -m devices.light) 与控制客户端，实测日志如下：
+
+1. 窗口 1（网关服务端 gateway.server 实测日志）：
+2026-11-17 18:56:01,618 INFO TCP gateway listening on ('127.0.0.1', 9000)
+2026-11-17 18:56:16,443 INFO {"event": "device.connected", "timestamp": "2026-11-17T10:56:16.443633+00:00", "device_id": "light_001"}
+2026-11-17 18:56:21,446 INFO {"event": "device.heartbeat", "timestamp": "2026-11-17T10:56:21.446671+00:00", "device_id": "light_001"}
+2026-11-17 18:57:04,047 INFO {"event": "device.disconnected", "timestamp": "2026-11-17T10:57:04.047833+00:00", "device_id": "light_001"}
+2026-11-17 18:57:24,595 INFO {"event": "device.connected", "timestamp": "2026-11-17T10:57:24.595216+00:00", "device_id": "light_001"}
+2026-11-17 18:57:55,212 INFO {"event": "device.disconnected", "timestamp": "2026-11-17T10:57:55.212437+00:00", "device_id": "light_001"}
+2026-11-17 18:58:09,298 INFO TCP gateway listening on ('127.0.0.1', 9000)
+2026-11-17 18:58:10,262 INFO {"event": "device.connected", "timestamp": "2026-11-17T10:58:10.262393+00:00", "device_id": "light_001"}
+2026-11-17 18:58:21,604 INFO {"event": "command.submitted", "timestamp": "2026-11-17T10:58:21.604881+00:00", "device_id": "light_001", "request_id": "bad29ea6ef814367a5d22955c5cb5cd8"}
+2026-11-17 18:58:21,605 INFO {"event": "command.sent", "timestamp": "2026-11-17T10:58:21.605006+00:00", "device_id": "light_001", "request_id": "bad29ea6ef814367a5d22955c5cb5cd8", "attempt": 1}
+2026-11-17 18:58:21,605 INFO {"event": "device.state", "timestamp": "2026-11-17T10:58:21.605450+00:00", "device_id": "light_001", "state": {"power": true}}
+2026-11-17 18:58:21,605 INFO {"event": "command.completed", "timestamp": "2026-11-17T10:58:21.605532+00:00", "device_id": "light_001", "request_id": "bad29ea6ef814367a5d22955c5cb5cd8", "status": "success", "state": {"power": true}}
+
+2. 窗口 2（模拟设备端 devices.light 实测日志）：
+Simulated light light_001 connected; state={"power": false}
+light light_001 disconnected (0 bytes read on a total of 4 expected bytes); retrying in 1s
+light light_001 disconnected ([Errno 61] Connect call failed ('127.0.0.1', 9000)); retrying in 2s
+light light_001 disconnected ([Errno 61] Connect call failed ('127.0.0.1', 9000)); retrying in 4s
+light light_001 disconnected ([Errno 61] Connect call failed ('127.0.0.1', 9000)); retrying in 8s
+Simulated light light_001 connected; state={"power": false}
+{"version": 1, "type": "COMMAND_RESULT", "payload": {"status": "success", "state": {"power": true}}, "device_id": "light_001", "request_id": "bad29ea6ef814367a5d22955c5cb5cd8"}
+
+3. 窗口 3（控制端指令返回与设备列表查询结果）：
+收到网关控制结果: {'version': 1, 'type': 'COMMAND_RESULT', 'payload': {'status': 'success', 'state': {'power': True}}, 'device_id': 'light_001', 'request_id': 'bad29ea6ef814367a5d22955c5cb5cd8'}
+当前网关设备列表: [{'device_id': 'light_001', 'device_type': 'light', 'protocol': 'TCP', 'online': True, 'state': {'power': True}, 'last_seen': '2026-11-17T10:58:21.605443+00:00'}]
+EOF
