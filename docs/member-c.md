@@ -32,7 +32,7 @@ On 16 November, all 46 automated tests passed, including real TCP door-lock and 
 
 ## User-provided browser acceptance evidence
 
-Evidence date: 19 November 2026. Environment visible in screenshots: Windows PowerShell and a browser at 127.0.0.1:8080; browser version was not supplied. Screenshot timestamps use UTC (+00:00). Original Chinese-language screenshots are retained unchanged as historical evidence collected before the English UI update. Captions describe only visible evidence.
+Evidence date: 19 November 2026. Environment visible in screenshots: Windows PowerShell and a browser at 127.0.0.1:8080; browser version was not supplied. Screenshot timestamps use UTC (+00:00). Original screenshots are retained unchanged. Evidence includes Chinese and English UI sessions. Captions describe only visible evidence.
 
 | Check | Evidence | Result |
 |---|---|---|
@@ -42,8 +42,12 @@ Evidence date: 19 November 2026. Environment visible in screenshots: Windows Pow
 | Sensor updates | Figures 1-4 | Values and report timestamps change |
 | Connection loss | Figure 5 | Warning displayed and controls disabled |
 | Connection recovery | Figure 7 | Live connection and all three online devices restored |
-| Control after recovery | Not shown | Pending |
-| Independent device offline/restart | Not shown | Pending |
+| Control after recovery | Figures 8-9 | New successful light and lock results after reconnection |
+| Light offline/restart | Figures 12-13 | Offline controls disabled; restart restores Online |
+| Lock offline | Figure 14 | Offline controls disabled; other devices remain Online |
+| Sensor expiry/restart | Figures 15-17 | Offline state retained; restart restores fresh matching sample |
+| Two-page consistency | Figure 10 | Matching states/timestamps; dynamic transition not captured |
+| Page refresh snapshot | Figure 11 | User-reported refresh yields connected device snapshot |
 | Executing/failed/unknown feedback | Not captured | Pending |
 
 ### Figure 1: Door locked
@@ -88,14 +92,71 @@ The live connection is established and light, lock and sensor are online with ne
 
 ![Figure 7: All device states restored](images/member-c/acceptance-07.png)
 
+### Figure 8: Light commands after reconnection
+
+The terminal shows reconnection followed by new successful power=true and power=false results. The UI shows the light online and off.
+
+![Figure 8: Light commands after reconnection](images/member-c/acceptance-08.png)
+
+### Figure 9: Lock commands after reconnection
+
+The terminal shows reconnection followed by successful locked=true and locked=false results. The UI shows Unlocked and command success.
+
+![Figure 9: Lock commands after reconnection](images/member-c/acceptance-09.png)
+
+### Figure 10: Two-page state consistency
+
+Two browser windows show matching device states and last-seen timestamps. The user supplied this as the multi-page test record; a static frame does not independently demonstrate update latency or absence of manual refresh.
+
+![Figure 10: Two-page state consistency](images/member-c/acceptance-10.png)
+
+### Figure 11: Snapshot after page refresh
+
+User-provided refresh-test screenshot shows the English console connected with all three devices online. This records the observed snapshot, not the refresh action itself.
+
+![Figure 11: Snapshot after page refresh](images/member-c/acceptance-11.png)
+
+### Figure 12: Light offline
+
+The light is Offline and its controls are disabled. The lock and sensor remain Online with later timestamps; the light terminal has returned to its prompt.
+
+![Figure 12: Light offline](images/member-c/acceptance-12.png)
+
+### Figure 13: Light restarted
+
+A new python -m devices.light invocation registers the light. The UI shows Online with enabled controls and a fresh timestamp. No new command after this particular restart is captured.
+
+![Figure 13: Light restarted](images/member-c/acceptance-13.png)
+
+### Figure 14: Lock offline
+
+The lock is Offline and its controls are disabled while light and sensor remain Online. The terminal has returned to its prompt.
+
+![Figure 14: Lock offline](images/member-c/acceptance-14.png)
+
+### Figure 15: Sensor expired
+
+The sensor is Offline with its last sample retained. Light and lock remain Online, and the lock has a successful command result.
+
+![Figure 15: Sensor expired](images/member-c/acceptance-15.png)
+
+### Figure 16: Sensor remains offline
+
+Sensor state and last-seen timestamp remain unchanged while other devices have later timestamps. Terminal report history alone does not establish current transmission; the process is at a prompt.
+
+![Figure 16: Sensor remains offline](images/member-c/acceptance-16.png)
+
+### Figure 17: Sensor restarted and reporting
+
+A new sensor process uses a new session_id and increasing sequence numbers. The UI is Online, and its 23.6 C / 48.6 % sample matches the visible seq=3 report.
+
+![Figure 17: Sensor restarted and reporting](images/member-c/acceptance-17.png)
+
 ## Remaining acceptance checks
 
-1. After recovery, operate the light and lock again and capture successful results.
-2. Stop only the light; verify it becomes offline while other devices continue updating. Restart it and verify control works.
-3. Stop the sensor, wait for gateway expiry, then restart it. Verify offline/online transitions and fresh timestamps.
-4. Refresh the page while devices have known states; verify the snapshot agrees.
-5. Open two tabs, control a device in one, and verify state updates in the other.
-6. Open `/api/devices` and compare returned states with the UI.
-7. Capture executing, failed and unknown results using reproducible supported fault injection, coordinating with device/reliability owners as necessary.
+- Capture a new successful light command after the isolated light restart and complete an isolated lock restart/control cycle. Reconnection/control after the earlier gateway interruption is already evidenced in Figures 8-9.
+- If required, record a short two-page video showing an automatic state transition without refreshing either page; Figure 10 records a matching snapshot.
+- Open `/api/devices` and compare returned states with the UI.
+- Capture executing, failed and unknown results using supported reproducible fault injection. Coordinate with device/reliability owners where necessary.
 
-Log persistence/query remains a separate member's responsibility. No missing log data is fabricated. Pending checks must not be recorded as passed without evidence.
+Log persistence/query remains a separate member's responsibility. No missing log data is fabricated. Only observed screenshot outcomes are recorded; no new automated test run was performed for this documentation-only update.
