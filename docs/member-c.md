@@ -48,6 +48,7 @@ Evidence date: 19 November 2026. Environment visible in screenshots: Windows Pow
 | Sensor expiry/restart | Figures 15-17 | Offline state retained; restart restores fresh matching sample |
 | Two-page consistency | Figure 10 | Matching states/timestamps; dynamic transition not captured |
 | Page refresh snapshot | Figure 11 | User-reported refresh yields connected device snapshot |
+| Invalid request rejection | Figure 18 | HTTP 400 with invalid command JSON response |
 | Executing/failed/unknown feedback | Not captured | Pending |
 
 ### Figure 1: Door locked
@@ -151,6 +152,14 @@ Sensor state and last-seen timestamp remain unchanged while other devices have l
 A new sensor process uses a new session_id and increasing sequence numbers. The UI is Online, and its 23.6 C / 48.6 % sample matches the visible seq=3 report.
 
 ![Figure 17: Sensor restarted and reporting](images/member-c/acceptance-17.png)
+
+### Figure 18: Invalid HTTP request rejected
+
+The complete screenshot shows the POST command, HTTP 400 Bad Request, and the server response `{"error": "invalid command"}`. It provides more complete evidence than the earlier header-only screenshot, which is not duplicated here. The submitted value was intended to be the string `"true"` rather than a boolean. Because Windows PowerShell 5.1 may alter quotation marks passed to native executables, this image establishes rejection of an invalid request, but does not isolate boolean-type validation from JSON parsing validation.
+
+The red PowerShell ParserError below the response occurred when the response JSON was subsequently entered as a shell command. It is separate from the HTTP response and does not indicate a server crash. This evidence does not verify a device execution failure or confirmation timeout.
+
+![Figure 18: Invalid HTTP request rejected](images/member-c/acceptance-18.png)
 
 ## Remaining acceptance checks
 
