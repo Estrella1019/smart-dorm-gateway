@@ -24,6 +24,12 @@ python3 scripts/run_scenarios.py
 
 场景结果 JSON 可粘贴到组内测试汇总；数据库文件在 `data/scenarios/` 与各次运行目录下（已在 `.gitignore`）。
 
+## 组长 Review 修复（2026-11-19）
+
+- `/api/logs?limit=`：非数字、≤0 或 >200 返回 **400**
+- 关停顺序：先 `gateway.close()`，再 `log_store.drain_and_close()`，避免漏记 `device.disconnected`
+- SQLite 写入在 `asyncio.to_thread` 中执行，写入失败记日志但不拖垮事件循环
+
 ## 提交 PR
 
 在分支 `feat/logging-tests` 上开发，目标分支选 **integration**。
