@@ -60,8 +60,8 @@ async def scenario_multi_device(db_path: Path) -> dict:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await store.close()
         await gateway.close()
+        await store.drain_and_close()
 
 
 async def scenario_offline_command(db_path: Path) -> dict:
@@ -86,8 +86,8 @@ async def scenario_offline_command(db_path: Path) -> dict:
             "offline_log_count": len(offline_rows),
         }
     finally:
-        await store.close()
         await gateway.close()
+        await store.drain_and_close()
 
 
 async def scenario_timeout_unknown(db_path: Path) -> dict:
@@ -117,8 +117,8 @@ async def scenario_timeout_unknown(db_path: Path) -> dict:
         }
     finally:
         await close_writer(writer)
-        await store.close()
         await gateway.close()
+        await store.drain_and_close()
 
 
 async def scenario_udp_report(db_path: Path) -> dict:
@@ -143,8 +143,8 @@ async def scenario_udp_report(db_path: Path) -> dict:
         }
     finally:
         transport.close()
-        await store.close()
         await gateway.close()
+        await store.drain_and_close()
 
 
 SCENARIOS = {

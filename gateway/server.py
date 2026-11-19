@@ -257,9 +257,9 @@ async def run(settings: Settings, log_db: str | None = "data/events.sqlite") -> 
     try:
         await gateway.serve_forever()
     finally:
-        if log_store:
-            await log_store.close()
         await gateway.close()
+        if log_store:
+            await log_store.drain_and_close()
 
 
 def main() -> None:

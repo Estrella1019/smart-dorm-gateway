@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from aiohttp import web
 from gateway.server import Gateway
-from gateway.storage import EventLogStore, attach_event_log
+from gateway.storage import EventLogStore, attach_event_log, parse_query_limit
 from shared.config import load_settings
 from shared.protocol import ProtocolError
 
@@ -76,7 +76,9 @@ def create_app(gateway, log_store: EventLogStore | None = None):
         if request_id:
             rows = log_store.query_by_request_id(request_id)
         else:
-            limit = min(int(request.rel_url.query.get('limit', 50)), 200)
+            limit = parse_query_limit(request.rel_url.query.get('limit'))
+            if limit is None:
+                return web.json_response({'error': 'invalid limit'}, status=400)
             rows = log_store.query_recent(
                 limit=limit,
                 device_id=request.rel_url.query.get('device_id'),
@@ -106,9 +108,9 @@ async def run(args):
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
-        if log_store:
-            await log_store.close()
         await gateway.close()
+        if log_store:
+            await log_store.drain_and_close()
 
 
 if __name__ == '__main__':

@@ -1,16 +1,22 @@
 """Event persistence and query (member 4).
 
 EventBus callbacks must stay non-blocking: events are queued and written by a background task.
+Database I/O runs in a worker thread so the asyncio loop is not blocked.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+LOG = logging.getLogger(__name__)
+
+MAX_QUERY_LIMIT = 200
+DEFAULT_QUERY_LIMIT = 50
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -42,6 +48,19 @@ _PERSIST_NAMES = frozenset({
 })
 
 
+def parse_query_limit(raw: str | None) -> int | None:
+    """Return a limit in 1..MAX_QUERY_LIMIT, or None if the parameter is invalid."""
+    if raw is None:
+        return DEFAULT_QUERY_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value < 1 or value > MAX_QUERY_LIMIT:
+        return None
+    return value
+
+
 def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     data = json.loads(row["payload"])
     event: dict[str, Any] = {
@@ -63,6 +82,7 @@ class EventLogStore:
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._conn: sqlite3.Connection | None = None
+        self._writer_ready = asyncio.Event()
 
     def enqueue(self, event: dict) -> None:
         name = event.get("event")
@@ -81,7 +101,8 @@ class EventLogStore:
         return conn
 
     def _insert(self, event: dict) -> None:
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("log writer not initialized")
         name = event["event"]
         ts = event.get("timestamp", "")
         device_id = event.get("device_id")
@@ -96,29 +117,47 @@ class EventLogStore:
     async def start(self) -> None:
         if self._task is not None:
             return
-        self._conn = self._open_writer()
+        self._writer_ready.clear()
         self._task = asyncio.create_task(self._writer_loop())
 
-    async def close(self) -> None:
+    async def drain_and_close(self, timeout: float = 5.0) -> None:
+        """Wait for queued events to flush, then stop the background writer."""
         if self._task is None:
             return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        idle_rounds = 0
+        while loop.time() < deadline:
+            if self._queue.empty():
+                idle_rounds += 1
+                if idle_rounds >= 3:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                idle_rounds = 0
+                await asyncio.sleep(0.01)
         await self._queue.put(None)
         await self._task
         self._task = None
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+
+    async def close(self) -> None:
+        await self.drain_and_close()
 
     async def _writer_loop(self) -> None:
         try:
+            self._conn = await asyncio.to_thread(self._open_writer)
+            self._writer_ready.set()
             while True:
                 event = await self._queue.get()
                 if event is None:
                     break
-                self._insert(event)
+                try:
+                    await asyncio.to_thread(self._insert, event)
+                except Exception:
+                    LOG.exception("failed to persist event %s", event.get("event"))
         finally:
             if self._conn:
-                self._conn.close()
+                await asyncio.to_thread(self._conn.close)
                 self._conn = None
 
     def _read(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
@@ -133,10 +172,11 @@ class EventLogStore:
     def query_recent(
         self,
         *,
-        limit: int = 50,
+        limit: int = DEFAULT_QUERY_LIMIT,
         event_name: str | None = None,
         device_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), MAX_QUERY_LIMIT))
         clauses = ["1=1"]
         params: list[Any] = []
         if event_name:

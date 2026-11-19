@@ -1,13 +1,37 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
+
 from aiohttp.test_utils import TestClient, TestServer
 from gateway.server import Gateway
+from gateway.storage import EventLogStore, attach_event_log
 from shared.config import Settings
 from devices.light import run_light
 from web.server import create_app
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_logs_limit_validation(self):
+        gateway = Gateway(Settings(tcp_port=0))
+        tmp = tempfile.TemporaryDirectory()
+        store = attach_event_log(gateway, EventLogStore(Path(tmp.name) / "events.sqlite"))
+        await store.start()
+        await gateway.start()
+        client = TestClient(TestServer(create_app(gateway, store)))
+        await client.start_server()
+        try:
+            for query in ('limit=abc', 'limit=-1', 'limit=0', 'limit=999'):
+                response = await client.get(f'/api/logs?{query}')
+                self.assertEqual(response.status, 400, query)
+            response = await client.get('/api/logs?limit=5')
+            self.assertEqual(response.status, 200)
+        finally:
+            await client.close()
+            await gateway.close()
+            await store.drain_and_close()
+            tmp.cleanup()
+
     async def test_real_socket_light_and_websocket(self):
         gateway = Gateway(Settings(tcp_port=0))
         await gateway.start()

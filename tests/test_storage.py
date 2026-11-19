@@ -1,11 +1,13 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from devices.light import Light
 from gateway.server import Gateway
-from gateway.storage import EventLogStore, attach_event_log
+from gateway.storage import EventLogStore, attach_event_log, parse_query_limit
+from unittest.mock import patch
 from shared.config import Settings
 from shared.protocol import make_message, send_message, read_message, close_writer
 
@@ -21,8 +23,8 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
         self.host, self.port = self.gateway.address[:2]
 
     async def asyncTearDown(self):
-        await self.store.close()
         await self.gateway.close()
+        await self.store.drain_and_close()
         self.tmp.cleanup()
 
     async def test_command_flow_logged_by_request_id(self):
@@ -83,6 +85,43 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(retries), 1)
         finally:
             await close_writer(writer)
+
+    def test_parse_query_limit_rejects_invalid(self):
+        self.assertEqual(parse_query_limit(None), 50)
+        self.assertIsNone(parse_query_limit("abc"))
+        self.assertIsNone(parse_query_limit("-1"))
+        self.assertIsNone(parse_query_limit("0"))
+        self.assertIsNone(parse_query_limit("201"))
+        self.assertEqual(parse_query_limit("10"), 10)
+        self.assertEqual(parse_query_limit("200"), 200)
+
+    async def test_shutdown_drains_disconnect_event(self):
+        task = asyncio.create_task(Light("bye").run(self.host, self.port, heartbeat_interval=0.05))
+        async with asyncio.timeout(2):
+            while not self.gateway.list_devices():
+                await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await self.gateway.close()
+        await self.store.drain_and_close()
+        rows = self.store.query_recent(event_name="device.disconnected", device_id="bye", limit=10)
+        self.assertTrue(rows)
+
+    async def test_writer_survives_insert_failure(self):
+        self.store.enqueue({
+            "event": "device.connected",
+            "timestamp": "2020-01-01T00:00:00+00:00",
+            "device_id": "x",
+        })
+        with patch.object(EventLogStore, "_insert", side_effect=sqlite3.OperationalError("disk fail")):
+            await asyncio.sleep(0.1)
+        self.store.enqueue({
+            "event": "device.connected",
+            "timestamp": "2020-01-01T00:00:01+00:00",
+            "device_id": "y",
+        })
+        await asyncio.sleep(0.15)
+        self.assertGreaterEqual(self.store.count_events(), 1)
 
 
 if __name__ == "__main__":
