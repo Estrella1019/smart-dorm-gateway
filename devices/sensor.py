@@ -27,15 +27,15 @@ class Sensor:
         self.device_id = device_id
         self.session_id = uuid4().hex
         self.seq = 0
-        self._rng = rng or random.Random()
+        self.rng = rng or random.Random()
         self.temperature = 24.0
         self.humidity = 50.0
 
     def sample(self) -> dict:
         # A small random walk looks more like a real room than independent noise.
-        self.temperature = min(max(self.temperature + self._rng.uniform(-0.3, 0.3),
+        self.temperature = min(max(self.temperature + self.rng.uniform(-0.3, 0.3),
                                    TEMPERATURE_RANGE[0]), TEMPERATURE_RANGE[1])
-        self.humidity = min(max(self.humidity + self._rng.uniform(-1.0, 1.0),
+        self.humidity = min(max(self.humidity + self.rng.uniform(-1.0, 1.0),
                                 HUMIDITY_RANGE[0]), HUMIDITY_RANGE[1])
         return {"temperature": round(self.temperature, 1), "humidity": round(self.humidity, 1)}
 
@@ -59,8 +59,15 @@ class _FireAndForget(asyncio.DatagramProtocol):
 
 
 async def run_sensor(host: str, port: int, device_id: str, interval: float = 5.0,
-                     count: int | None = None, sensor: Sensor | None = None) -> None:
-    """Send a report every interval seconds; count limits the total (None = forever)."""
+                     count: int | None = None, sensor: Sensor | None = None,
+                     drop_rate: float = 0.0) -> None:
+    """Send a report every interval seconds; count limits the total (None = forever).
+
+    drop_rate (0..1) skips sending some reports to imitate packet loss; their seq
+    numbers are still used up, so the receiver sees the gap.
+    """
+    if not 0 <= drop_rate <= 1:
+        raise ValueError("drop_rate must be between 0 and 1")
     sensor = sensor or Sensor(device_id)
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
         _FireAndForget, remote_addr=(host, port))
@@ -70,8 +77,11 @@ async def run_sensor(host: str, port: int, device_id: str, interval: float = 5.0
         sent = 0
         while count is None or sent < count:
             report = sensor.next_report()
-            transport.sendto(encode_datagram(report))
-            print(json.dumps(report, ensure_ascii=False), flush=True)
+            if drop_rate and sensor.rng.random() < drop_rate:
+                print(f"fault: dropped report seq {report['payload']['seq']}", flush=True)
+            else:
+                transport.sendto(encode_datagram(report))
+                print(json.dumps(report, ensure_ascii=False), flush=True)
             sent += 1
             if count is None or sent < count:
                 await asyncio.sleep(interval)
@@ -86,11 +96,14 @@ def main() -> None:
     parser.add_argument("--udp-port", type=int, default=None)
     parser.add_argument("--device-id", default="sensor_001")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between reports")
+    parser.add_argument("--drop-rate", type=float, default=0.0,
+                        help="Fault injection: chance 0..1 of not sending a report")
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
-        asyncio.run(run_sensor(args.host or settings.host, args.udp_port if args.udp_port is not None else settings.udp_port,
-                               args.device_id, args.interval))
+        udp_port = args.udp_port if args.udp_port is not None else settings.udp_port
+        asyncio.run(run_sensor(args.host or settings.host, udp_port,
+                               args.device_id, args.interval, drop_rate=args.drop_rate))
     except KeyboardInterrupt:
         pass
     except (OSError, ValueError) as exc:

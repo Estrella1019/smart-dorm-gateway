@@ -3,13 +3,29 @@
 import argparse
 import asyncio
 import json
+import random
 from collections import OrderedDict
+from dataclasses import dataclass
 
 from shared.config import load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
 
 
 RETRYABLE_ERRORS = (OSError, TimeoutError, asyncio.IncompleteReadError, ProtocolError)
+
+
+@dataclass
+class Faults:
+    """Test switches for misbehaving devices. All off by default."""
+    delay: float = 0.0             # seconds to wait before handling each command
+    drop_ack: float = 0.0          # chance (0..1) to execute a command but not reply
+    disconnect_after: float = 0.0  # drop each connection after this many seconds; 0 = never
+
+    def __post_init__(self):
+        if self.delay < 0 or self.disconnect_after < 0:
+            raise ValueError("fault delays must not be negative")
+        if not 0 <= self.drop_ack <= 1:
+            raise ValueError("drop_ack must be between 0 and 1")
 
 
 def _raise_if_cancelling() -> None:
@@ -32,6 +48,8 @@ class TcpDevice:
         # request_id -> result payload, oldest first. Kept across reconnects so a
         # command resent after a lost acknowledgment is answered, not re-executed.
         self._recent_results: OrderedDict[str, dict] = OrderedDict()
+        self.faults = Faults()
+        self.rng = random.Random()
 
     def state(self) -> dict:
         raise NotImplementedError
@@ -61,6 +79,30 @@ class TcpDevice:
             await asyncio.sleep(interval)
             await self._send(writer, make_message("HEARTBEAT", device_id=self.device_id))
 
+    async def _serve_commands(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while True:
+            message = await read_message(reader)
+            if message["type"] != "COMMAND" or message.get("device_id") != self.device_id:
+                raise ProtocolError("unexpected gateway message")
+            payload = message["payload"]
+            request_id = message.get("request_id")
+            if not request_id:
+                raise ProtocolError("missing request_id")
+            if self.faults.delay:
+                await asyncio.sleep(self.faults.delay)
+            result_payload, duplicate = self.handle_command(request_id, payload)
+            if duplicate:
+                print(f"duplicate request_id {request_id}; "
+                      "replaying earlier result without executing", flush=True)
+            if self.faults.drop_ack and self.rng.random() < self.faults.drop_ack:
+                print(f"fault: dropped acknowledgment for {request_id} "
+                      f"(state is now {json.dumps(self.state())})", flush=True)
+                continue
+            result = make_message("COMMAND_RESULT", result_payload,
+                                  device_id=self.device_id, request_id=request_id)
+            await self._send(writer, result)
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+
     async def run(self, host: str, port: int, heartbeat_interval: float = 5.0) -> None:
         """heartbeat_interval <= 0 disables heartbeats."""
         reader, writer = await asyncio.open_connection(host, port)
@@ -79,21 +121,17 @@ class TcpDevice:
                   f"state={json.dumps(self.state())}", flush=True)
             if heartbeat_interval > 0:
                 heartbeat = asyncio.create_task(self._heartbeat(writer, heartbeat_interval))
-            while True:
-                message = await read_message(reader)
-                if message["type"] != "COMMAND" or message.get("device_id") != self.device_id:
-                    raise ProtocolError("unexpected gateway message")
-                payload = message["payload"]
-                if not message.get("request_id"):
-                    raise ProtocolError("missing request_id")
-                result_payload, duplicate = self.handle_command(message["request_id"], payload)
-                result = make_message("COMMAND_RESULT", result_payload,
-                                      device_id=self.device_id, request_id=message["request_id"])
-                await self._send(writer, result)
-                if duplicate:
-                    print(f"duplicate request_id {message['request_id']}; "
-                          "replaying earlier result without executing", flush=True)
-                print(json.dumps(result, ensure_ascii=False), flush=True)
+            faults = self.faults
+            deadline = (asyncio.get_running_loop().time() + faults.disconnect_after
+                        if faults.disconnect_after else None)
+            try:
+                async with asyncio.timeout_at(deadline) as connection_timer:
+                    await self._serve_commands(reader, writer)
+            except TimeoutError:
+                if not connection_timer.expired():
+                    raise
+                print(f"fault: dropping connection after {faults.disconnect_after:g}s", flush=True)
+                raise ConnectionResetError("fault: disconnect_after") from None
         finally:
             if heartbeat:
                 heartbeat.cancel()
@@ -132,10 +170,18 @@ def run_device_cli(device_class: type[TcpDevice], description: str, default_id: 
                         help="Longest wait between reconnect attempts, in seconds")
     parser.add_argument("--no-reconnect", action="store_true",
                         help="Exit on the first disconnect instead of reconnecting")
+    faults = parser.add_argument_group("fault injection (for testing the gateway)")
+    faults.add_argument("--delay", type=float, default=0.0,
+                        help="Seconds to wait before handling each command")
+    faults.add_argument("--drop-ack", type=float, default=0.0,
+                        help="Chance 0..1 of executing a command without replying")
+    faults.add_argument("--disconnect-after", type=float, default=0.0,
+                        help="Drop each connection after this many seconds; 0 = never")
     args = parser.parse_args()
     try:
         settings = load_settings(args.config)
         device = device_class(args.device_id)
+        device.faults = Faults(args.delay, args.drop_ack, args.disconnect_after)
         host = args.host or settings.host
         if args.no_reconnect:
             asyncio.run(device.run(host, settings.tcp_port, args.heartbeat_interval))
