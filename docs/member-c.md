@@ -1,94 +1,101 @@
-# 组员 C：网页控制台交付与验收（更新至11月19日）
+# Member C: Web Console Delivery and Acceptance
 
-## 已完成与边界
+Updated: 19 November 2026. Branch: `yuan-web-console`.
 
-integration 已合并 TCP 灯/门锁、UDP 温湿度、可靠控制和网页。网页提供 HTTP 查询/控制、WebSocket 实时快照、断线后2秒重连、执行中/成功/失败/结果未知提示。页面将 power、locked、temperature、humidity 转成中文状态和单位。状态只依据网关快照，不因点击按钮自行改成成功。
+## Scope
 
-组员C使用 Python aiohttp、asyncio、HTML/CSS/JavaScript 和 Fetch/WebSocket。create_app(gateway) 注入现有 Gateway；GET /api/devices 调 list_devices，POST /api/devices/{id}/commands 调 await submit_command，JSON 为 action/value，动作 set_power 或 set_locked，value 必须布尔。400 表示参数错误，422 表示网关拒绝动作，HTTP 200 内还须检查 status。GET /ws 首次和每次事件返回 event/devices。每浏览器队列32条，满时丢最旧状态消息；不承诺完整日志。
+HTTP device queries and control, WebSocket state updates, connection-loss feedback, automatic reconnection, light and door-lock controls, temperature/humidity display, and command feedback are implemented. Device state is obtained from the gateway; clicking a button does not assume successful execution. This module reuses Gateway and does not implement device sockets, retries, or device deduplication.
 
-## 启动
+## Running
 
-仓库根目录运行 python -m pip install -r requirements.txt，再运行 python -m web.server。该入口已启动网关，不要另开 gateway.server。浏览器访问 http://127.0.0.1:8080 。另开终端分别运行 python -m devices.light、python -m devices.door_lock、python -m devices.sensor。配置和异常注入参数以各命令 --help 和 docs/integration.md 为准。
+From the repository root:
 
-## 人工验收表（依据用户11月19日提供截图）
+```sh
+python -m pip install -r requirements.txt
+python -m web.server
+```
 
-|步骤|应观察结果|实际结果|
+Open http://127.0.0.1:8080 . In separate terminals run `python -m devices.light`, `python -m devices.door_lock`, and `python -m devices.sensor`. The web entry point already starts the gateway. Use `--help` and [integration instructions](integration.md) for supported configuration.
+
+## Interface contract
+
+- `GET /`: web console.
+- `GET /api/devices`: `{devices: [...]}` from `list_devices()`.
+- `POST /api/devices/{device_id}/commands`: JSON containing `action` (`set_power` or `set_locked`) and boolean `value`; awaits `submit_command()` and returns its result. HTTP 400 rejects invalid input; 422 rejects unsupported commands. HTTP 200 still requires checking business status.
+- `/ws`: initial snapshot and subsequent `{event, devices}` messages from EventBus. Each connection has a 32-message queue; oldest messages are dropped on overflow. Messages include full state snapshots; this is not an audit log.
+
+The browser reconnects after two seconds and refreshes its snapshot. During disconnection, controls are disabled and displayed state is marked potentially stale. Seen-device history is in memory only. The default listener is loopback; this module does not provide authentication or production door-access security.
+
+## Verification
+
+On 16 November, all 46 automated tests passed, including real TCP door-lock and UDP/web integration. UDP socket/transport ResourceWarnings were observed and remain assigned to the device/integration owner. The success-message precedence fix was subsequently checked against success, unknown, failed, API-error and unrecognized-response cases. The English UI update does not constitute a new full regression run.
+
+## User-provided browser acceptance evidence
+
+Evidence date: 19 November 2026. Environment visible in screenshots: Windows PowerShell and a browser at 127.0.0.1:8080; browser version was not supplied. Screenshot timestamps use UTC (+00:00). Original Chinese-language screenshots are retained unchanged as historical evidence collected before the English UI update. Captions describe only visible evidence.
+
+| Check | Evidence | Result |
 |---|---|---|
-|打开页面并启动三种设备|列表出现灯、门锁、传感器|截图1—4显示三设备在线|
-|开灯、关灯|执行中后成功，设备终端与页面一致|截图3、4显示开关灯状态与终端成功结果一致；执行中瞬态未截图|
-|上锁、解锁|终端与中文状态一致|截图1、2显示上锁/解锁及成功结果，与终端一致|
-|观察传感器|温度℃和湿度%随UDP上报更新|截图1—4数值和上报时间变化，页面展示正常|
-|停止并重新启动设备|离线、恢复在线，状态正确|待验收|
-|停止并重启网页服务|连接中断禁用按钮，恢复后刷新快照|截图5显示断线提示与禁用按钮；截图5断线禁用按钮；截图7连接恢复、三设备在线，恢复后再次控制仍待补证|
-|按设备支持的参数延迟或丢弃回复|结果未知不等于未执行；记录重试|待联合验收|
+| Device listing | Figures 1-4 | Light, lock and sensor shown online |
+| Light on/off | Figures 3-4 | UI state and terminal success results agree |
+| Lock/unlock | Figures 1-2 | UI state and terminal success results agree |
+| Sensor updates | Figures 1-4 | Values and report timestamps change |
+| Connection loss | Figure 5 | Warning displayed and controls disabled |
+| Connection recovery | Figure 7 | Live connection and all three online devices restored |
+| Control after recovery | Not shown | Pending |
+| Independent device offline/restart | Not shown | Pending |
+| Executing/failed/unknown feedback | Not captured | Pending |
 
-验收时记录日期、浏览器版本、操作、预期/实际和截图。没有人工操作和截图时不能填写通过。自动测试不代替浏览器验收。
+### Figure 1: Door locked
 
-## 后续依赖
+The UI shows Locked and command success. The latest terminal result reports locked=true.
 
-门锁与传感器的原网关缺口已在 integration 补齐，不再是阻塞。组员A/B配合异常注入和设备恢复验证，组员D补日志持久化及查询；日志接口未就绪时网页不虚构查询结果。组员C已提供部分浏览器验收截图，仍需补齐设备恢复、异常提示验收及演示录像，11月19日前提交实际记录。不要修改其他组员Socket实现。
+![Figure 1: Door locked](images/member-c/acceptance-01.png)
 
-## 本次验证记录
+### Figure 2: Door unlocked
 
-2026-11-16，本机完整回归46项全部通过，包含门锁和UDP网页集成测试。JavaScript语法检查通过。测试期间出现UDP socket/transport未关闭的ResourceWarning，未修改设备与网关代码，交组员A/集成负责人跟进。当时尚未执行浏览器人工验收；11月19日新增截图证据见下文。
+The UI shows Unlocked and command success. A new terminal result reports locked=false.
 
-## 11月19日截图验收证据
+![Figure 2: Door unlocked](images/member-c/acceptance-02.png)
 
-证据来源：用户实际操作截图，原图保留。画面为 Windows PowerShell 与本机浏览器 http://127.0.0.1:8080；浏览器具体版本未提供。截图上报时间为 UTC（+00:00）。以下仅记录画面可见事实，不将截图视作完整网络抓包或全部场景验收。
+### Figure 3: Light on
 
-### 图1：门锁上锁成功
+The UI shows On and command success; the terminal reports power=true.
 
-三设备在线，门锁显示已上锁，操作结果为 lock_001 执行成功；右侧终端最新成功结果 locked=true。
+![Figure 3: Light on](images/member-c/acceptance-03.png)
 
-![图1 门锁上锁成功](images/member-c/acceptance-01.png)
+### Figure 4: Light off
 
-### 图2：门锁解锁成功
+The UI shows Off and command success; the terminal reports power=false. Sensor values have changed since Figure 3.
 
-门锁显示已解锁，操作结果成功；终端新增 locked=false 的成功结果。与图1对照，传感器数据亦已变化。
+![Figure 4: Light off](images/member-c/acceptance-04.png)
 
-![图2 门锁解锁成功](images/member-c/acceptance-02.png)
+### Figure 5: Live connection lost
 
-### 图3：灯开启成功
+The warning identifies stale state and disabled controls. Retained Online labels are old snapshot values, not evidence of current connectivity.
 
-灯显示开启，操作结果为 light_001 执行成功；终端最新成功结果 power=true。
+![Figure 5: Live connection lost](images/member-c/acceptance-05.png)
 
-![图3 灯开启成功](images/member-c/acceptance-03.png)
+### Figure 6: Partial recovery
 
-### 图4：灯关闭成功
+The connection is restored and sensor data is updated. This frame alone does not prove light/lock recovery or a new command; the previous success message may be retained.
 
-灯显示关闭，操作结果成功；终端新增 power=false 的成功结果。温湿度数值及上报时间较图3变化。
+![Figure 6: Partial recovery](images/member-c/acceptance-06.png)
 
-![图4 灯关闭成功](images/member-c/acceptance-04.png)
+### Figure 7: All device states restored
 
-### 图5：实时连接断开
+The live connection is established and light, lock and sensor are online with newer timestamps. Controls are available. A new post-recovery command is not shown.
 
-网页明确提示连接断开、正在重连及状态可能过期，灯与门锁按钮灰显。卡片仍保留旧在线快照，不能据此认定设备当前在线。
+![Figure 7: All device states restored](images/member-c/acceptance-07.png)
 
-![图5 实时连接断开](images/member-c/acceptance-05.png)
+## Remaining acceptance checks
 
-### 图6：实时连接恢复（部分）
+1. After recovery, operate the light and lock again and capture successful results.
+2. Stop only the light; verify it becomes offline while other devices continue updating. Restart it and verify control works.
+3. Stop the sensor, wait for gateway expiry, then restart it. Verify offline/online transitions and fresh timestamps.
+4. Refresh the page while devices have known states; verify the snapshot agrees.
+5. Open two tabs, control a device in one, and verify state updates in the other.
+6. Open `/api/devices` and compare returned states with the UI.
+7. Capture executing, failed and unknown results using reproducible supported fault injection, coordinating with device/reliability owners as necessary.
 
-网页显示实时连接正常，传感器在线且上报时间更新。画面只显示传感器，不能证明灯和门锁均已恢复；底部旧 light_001 成功文字也不能作为重启后控制成功证据。
-
-![图6 实时连接恢复（部分）](images/member-c/acceptance-06.png)
-
-待补证据：独立设备离线及重启恢复、网页恢复后灯/门锁再次控制成功、执行中瞬态、失败与超时未知提示、异常重试/去重。
-
-### 图7：重连后三设备恢复在线
-
-用户提供的恢复截图显示实时连接正常，light_001、lock_001、sensor_001 均在线，控制按钮可用；上报时间较断线前更新。该图支持三设备状态恢复展示，不单独证明恢复后已再次执行控制命令。
-
-![图7 重连后三设备恢复在线](images/member-c/acceptance-07.png)
-
-## 补充验收步骤
-
-|项目|操作|预期|记录状态|
-|---|---|---|---|
-|恢复后控制|在当前恢复页面分别开关灯、上锁解锁|状态变化且显示对应设备执行成功|待执行|
-|单设备离线恢复|只停止灯进程，观察离线后重启|灯离线禁用控制，其他设备正常；重启后可控制|待执行|
-|传感器超时恢复|停止传感器，等待网关超时，再重启|显示离线；重启后在线且时间、数值更新|待执行|
-|刷新快照|设备处于已知状态时刷新浏览器|状态与设备一致，连接正常|待执行|
-|多页面同步|开两个浏览器标签，在一个标签控制灯|另一个标签自动更新设备状态|待执行|
-|查询接口|打开 /api/devices|返回含三个设备的JSON，与页面状态一致|待执行|
-
-失败、结果未知、重试与去重需可复现的异常注入方式；没有相应证据时保持待验收，不以正常控制截图代替。
+Log persistence/query remains a separate member's responsibility. No missing log data is fabricated. Pending checks must not be recorded as passed without evidence.
