@@ -1,81 +1,171 @@
-# 组员 C：运行、接口与讲解
+# Member C: Web Console Delivery and Acceptance
 
-实测记录（2026-11-14）：新增网页集成测试通过。完整回归 20 项中 19 项通过，原分支 test_member2.test_command_queuing 失败：预期第二条命令 value=False，实际收到 True，可能读到重试消息，尚未定位。未做浏览器人工验收或门锁/UDP 端到端测试。Git 克隆两次连接超时，尚未上传远程。
+Updated: 19 November 2026. Branch: `yuan-web-console`.
 
-## 启动与验收
+## Scope
 
-Python 3.11+。在仓库根目录运行：
+HTTP device queries and control, WebSocket state updates, connection-loss feedback, automatic reconnection, light and door-lock controls, temperature/humidity display, and command feedback are implemented. Device state is obtained from the gateway; clicking a button does not assume successful execution. This module reuses Gateway and does not implement device sockets, retries, or device deduplication.
 
-```powershell
+## Running
+
+From the repository root:
+
+```sh
 python -m pip install -r requirements.txt
-python -m web.server --host 127.0.0.1 --port 8080
+python -m web.server
 ```
 
-另开终端运行 `python -m devices.light`（设备参数见 `python -m devices.light --help`），浏览器访问 http://127.0.0.1:8080 。网页启动器已经启动 TCP 网关，不要同时启动 `gateway.server` 占用 9000 端口。原配置通过 `--config config.example.toml` 传入，不修改原配置契约。
+Open http://127.0.0.1:8080 . In separate terminals run `python -m devices.light`, `python -m devices.door_lock`, and `python -m devices.sensor`. The web entry point already starts the gateway. Use `--help` and [integration instructions](integration.md) for supported configuration.
 
-运行测试：`python -m unittest discover -s tests -v`。手工验证：开灯、关灯，检查模拟灯终端与网页状态一致；关闭设备进程观察离线，重新启动观察在线；停止网页服务观察连接中断，重启观察自动重连。浏览器人工验收需另行执行。
+## Interface contract
 
-## 交付范围
+- `GET /`: web console.
+- `GET /api/devices`: `{devices: [...]}` from `list_devices()`.
+- `POST /api/devices/{device_id}/commands`: JSON containing `action` (`set_power` or `set_locked`) and boolean `value`; awaits `submit_command()` and returns its result. HTTP 400 rejects invalid input; 422 rejects unsupported commands. HTTP 200 still requires checking business status.
+- `/ws`: initial snapshot and subsequent `{event, devices}` messages from EventBus. Each connection has a 32-message queue; oldest messages are dropped on overflow. Messages include full state snapshots; this is not an audit log.
 
-11 月 10 日：HTTP 列表、真实网关灯控制、网页反馈已实现。11 月 15 日：WebSocket 和重连已实现；传感器状态以原样 JSON 显示，门锁提供 set_locked 薄适配入口，但实际端到端验收依赖组员完成设备及网关支持。
+The browser reconnects after two seconds and refreshes its snapshot. During disconnection, controls are disabled and displayed state is marked potentially stale. Seen-device history is in memory only. The default listener is loopback; this module does not provide authentication or production door-access security.
 
-当前仓库是下载的 jinxinyi-reliable-control 分支压缩包快照，没有 Git 提交历史；没有提交或推送远程修改。
+## Verification
 
-## 已核对的服务契约
+On 16 November, all 46 automated tests passed, including real TCP door-lock and UDP/web integration. UDP socket/transport ResourceWarnings were observed and remain assigned to the device/integration owner. The success-message precedence fix was subsequently checked against success, unknown, failed, API-error and unrecognized-response cases. The English UI update does not constitute a new full regression run.
 
-- `Gateway.list_devices()` 同步返回字典列表，注册表当前只保存在线灯。
-- `submit_command(device_id, action, value)` 异步等待设备结果，当前仅支持 set_power + bool，返回 request_id/status/state?/reason?。
-- `send_to_device(device_id, message)` 仅负责发送，不保证执行成功。网页不直接调用它。
-- `EventBus.subscribe(callback)` 同步回调；适配层仅向有界队列入队，不在回调里等待网络。
-- 网关原启动为 `python -m gateway.server`；新入口在同一事件循环创建原 Gateway，不重写 Socket。
+## User-provided browser acceptance evidence
 
-## HTTP / WebSocket
+Evidence date: 19 November 2026. Environment visible in screenshots: Windows PowerShell and a browser at 127.0.0.1:8080; browser version was not supplied. Screenshot timestamps use UTC (+00:00). Original screenshots are retained unchanged. Evidence includes Chinese and English UI sessions. Captions describe only visible evidence.
 
-GET `/api/devices` 返回 `{devices:[{device_id,device_type,online,state,last_seen,...}]}`。
-POST `/api/devices/{id}/commands` 请求 `{action:"set_power",value:true}` 或 set_locked，返回网关原结果。400 参数非法；422 当前网关不支持；200 的 failed/unknown 仍须按业务结果解释。HTTP 请求持续等待确认，网页立即显示执行中。
-GET `/ws` 升级连接，首次及每次事件返回 `{event:{event,timestamp?,...},devices:[...]}`。事件沿用 device.connected/disconnected/state/heartbeat、command.submitted/completed；首次 event 为 snapshot。每连接队列 32 条，拥塞时丢最旧消息，最新消息包含完整快照用于恢复状态；不承诺事件审计完整性。
+| Check | Evidence | Result |
+|---|---|---|
+| Device listing | Figures 1-4 | Light, lock and sensor shown online |
+| Light on/off | Figures 3-4 | UI state and terminal success results agree |
+| Lock/unlock | Figures 1-2 | UI state and terminal success results agree |
+| Sensor updates | Figures 1-4 | Values and report timestamps change |
+| Connection loss | Figure 5 | Warning displayed and controls disabled |
+| Connection recovery | Figure 7 | Live connection and all three online devices restored |
+| Control after recovery | Figures 8-9 | New successful light and lock results after reconnection |
+| Light offline/restart | Figures 12-13 | Offline controls disabled; restart restores Online |
+| Lock offline | Figure 14 | Offline controls disabled; other devices remain Online |
+| Sensor expiry/restart | Figures 15-17 | Offline state retained; restart restores fresh matching sample |
+| Two-page consistency | Figure 10 | Matching states/timestamps; dynamic transition not captured |
+| Page refresh snapshot | Figure 11 | User-reported refresh yields connected device snapshot |
+| Invalid request rejection | Figure 18 | HTTP 400 with invalid command JSON response |
+| Executing/failed/unknown feedback | Not captured | Pending |
 
-重连后重新获取快照。只保留本次服务运行见过的离线设备，无持久历史；服务重启后离线历史丢失。断开 WebSocket 时禁止控制并提示状态可能过期。设备状态只来自注册表，不因点击按钮而乐观修改。
+### Figure 1: Door locked
 
-## 需要其他组员配合
+The UI shows Locked and command success. The latest terminal result reports locked=true.
 
-组员 1/组长补 UDP REPORT、温湿度设备、门锁注册与控制协议；组员 2 确认可靠控制行为，并确认门锁使用 set_locked/bool 或在适配层修改映射。统一 device_type（建议 light/lock/sensor）、state 字段、事件名称，保持 list_devices / submit_command 签名。当前分支已有心跳超时、排队和有限重试；网页直接订阅相应事件。组员 4 提供日志查询接口后再暴露 HTTP，不重复实现日志。新增 aiohttp 依赖需小组集成时确认。
+![Figure 1: Door locked](images/member-c/acceptance-01.png)
 
-## 中文逐段讲解与答辩
+### Figure 2: Door unlocked
 
-第一段：我的模块把浏览器和网关连接起来。HTML 展示设备，HTTP 查询和提交控制，WebSocket 推送变化。TCP/UDP 由原网关维护，我没有另建设备连接。
+The UI shows Unlocked and command success. A new terminal result reports locked=false.
 
-第二段：`create_app` 接收 Gateway，体现依赖注入。HTTP 处理器校验布尔值和动作，再 await submit_command。服务返回成功前必须收到设备 COMMAND_RESULT，网络发送成功不能代替执行成功。
+![Figure 2: Door unlocked](images/member-c/acceptance-02.png)
 
-第三段：事件回调向每个浏览器的有界队列放消息，发送协程负责网络传输。这避免慢浏览器阻塞设备处理；完整快照帮助客户端在丢消息和重连后恢复一致。
+### Figure 3: Light on
 
-第四段：网页点击后显示执行中，收到结果再显示成功、失败或未知。超时说明没有收到确认，设备可能已经执行，因此不能简单显示执行失败，也不能无条件重试开锁。
+The UI shows On and command success; the terminal reports power=true.
 
-数据流：按钮 → HTTP → submit_command → 原 TCP Socket → 灯执行 → COMMAND_RESULT → pending Future 完成 → HTTP 结果；同时 EventBus → 有界队列 → WebSocket → 网页状态刷新。传感器未来走 UDP → 注册表/事件 → 同一网页链路。
+![Figure 3: Light on](images/member-c/acceptance-03.png)
 
-教授问：为什么用 HTTP 和 WebSocket？答：HTTP 适合明确的查询和提交，WebSocket 让网关主动通知状态，减少轮询。
+### Figure 4: Light off
 
-教授问：TCP 可靠是否代表设备执行成功？答：不能，TCP 保证字节流传输，执行语义必须依赖应用层确认。
+The UI shows Off and command success; the terminal reports power=false. Sensor values have changed since Figure 3.
 
-教授问：如何处理确认丢失？答：显示结果未知，由可靠控制层负责同请求号重试和设备去重，再通过状态上报核对；当前分支已实现有限重试，设备端去重仍需核对。
+![Figure 4: Light off](images/member-c/acceptance-04.png)
 
-教授问：断网恢复如何保证一致？答：重建 WebSocket 后读取完整快照；断网期间显示状态过期并禁止操作。
+### Figure 5: Live connection lost
 
-教授问：是否完成全部设备？答：目前只可实测灯；门锁和传感器界面适配已预留，网关尚无对应设备支持，不能把页面存在当作端到端完成。
+The warning identifies stale state and disabled controls. Retained Online labels are old snapshot values, not evidence of current connectivity.
 
-教授问：可以直接用于真实门禁吗？答：课程计划限定本地模拟系统，没有鉴权和生产门禁安全机制，默认只监听回环地址。
+![Figure 5: Live connection lost](images/member-c/acceptance-05.png)
 
+### Figure 6: Partial recovery
 
-## 三分支核对结论（2026-11-14）
+The connection is restored and sensor data is updated. This frame alone does not prove light/lock recovery or a new command; the previous success message may be retained.
 
-main 为基础骨架；jinxinyi-reliable-control 增加软离线、串行排队及相同请求号重试；feat/device-simulators 增加 TcpDevice、DoorLock 和 UDP Sensor，但该分支 gateway/server.py 仍只接纳 light，没有 UDP 接收器。因此设备端已完成不代表已接通网关。
+![Figure 6: Partial recovery](images/member-c/acceptance-06.png)
 
-门锁实际 device_type=door_lock，动作 set_locked，状态 locked；网页已兼容该名称。传感器 device_type=sensor，state.temperature/state.humidity；REPORT payload 另有 session_id、seq，UDP 默认 9001。网页展示原始状态，不自行生成温湿度。
+### Figure 7: All device states restored
 
-阻塞项：组长/网关负责人合并设备分支并增加 door_lock 注册、按类型验证状态、set_locked 路由，以及 UDP REPORT 接收/设备注册/事件发布和 session_id+seq 处理。组员2确认门锁同样通过 submit_command 获得可靠控制并协调心跳间隔（设备默认5秒、网关阈值5秒，可能边界误判）。组员4日志接口暂不影响网页基础功能，但未提供时无法做日志查询。组员C不重写这些 Socket 模块。
+The live connection is established and light, lock and sensor are online with newer timestamps. Controls are available. A new post-recovery command is not shown.
 
-可验收：真实列表与灯控制、HTTP 参数检查、WebSocket 快照；待联合验收：门锁、UDP温湿度、离线恢复与重试/去重。不要将测试替身的数据当作真实设备接入证明。
+![Figure 7: All device states restored](images/member-c/acceptance-07.png)
 
-新增复核：真实 TCP 灯控制、WebSocket command.completed、device.disconnected 以及 WebSocket 重连离线快照测试通过。上传尝试再次因 github.com:443 连接失败而中断，尚未进入账号认证阶段。
+### Figure 8: Light commands after reconnection
 
-上传准备：已成功取得可靠控制分支 Git 工作副本，交付改动仅包含网页、依赖、网页测试、文档及 CI 依赖安装步骤。
+The terminal shows reconnection followed by new successful power=true and power=false results. The UI shows the light online and off.
+
+![Figure 8: Light commands after reconnection](images/member-c/acceptance-08.png)
+
+### Figure 9: Lock commands after reconnection
+
+The terminal shows reconnection followed by successful locked=true and locked=false results. The UI shows Unlocked and command success.
+
+![Figure 9: Lock commands after reconnection](images/member-c/acceptance-09.png)
+
+### Figure 10: Two-page state consistency
+
+Two browser windows show matching device states and last-seen timestamps. The user supplied this as the multi-page test record; a static frame does not independently demonstrate update latency or absence of manual refresh.
+
+![Figure 10: Two-page state consistency](images/member-c/acceptance-10.png)
+
+### Figure 11: Snapshot after page refresh
+
+User-provided refresh-test screenshot shows the English console connected with all three devices online. This records the observed snapshot, not the refresh action itself.
+
+![Figure 11: Snapshot after page refresh](images/member-c/acceptance-11.png)
+
+### Figure 12: Light offline
+
+The light is Offline and its controls are disabled. The lock and sensor remain Online with later timestamps; the light terminal has returned to its prompt.
+
+![Figure 12: Light offline](images/member-c/acceptance-12.png)
+
+### Figure 13: Light restarted
+
+A new python -m devices.light invocation registers the light. The UI shows Online with enabled controls and a fresh timestamp. No new command after this particular restart is captured.
+
+![Figure 13: Light restarted](images/member-c/acceptance-13.png)
+
+### Figure 14: Lock offline
+
+The lock is Offline and its controls are disabled while light and sensor remain Online. The terminal has returned to its prompt.
+
+![Figure 14: Lock offline](images/member-c/acceptance-14.png)
+
+### Figure 15: Sensor expired
+
+The sensor is Offline with its last sample retained. Light and lock remain Online, and the lock has a successful command result.
+
+![Figure 15: Sensor expired](images/member-c/acceptance-15.png)
+
+### Figure 16: Sensor remains offline
+
+Sensor state and last-seen timestamp remain unchanged while other devices have later timestamps. Terminal report history alone does not establish current transmission; the process is at a prompt.
+
+![Figure 16: Sensor remains offline](images/member-c/acceptance-16.png)
+
+### Figure 17: Sensor restarted and reporting
+
+A new sensor process uses a new session_id and increasing sequence numbers. The UI is Online, and its 23.6 C / 48.6 % sample matches the visible seq=3 report.
+
+![Figure 17: Sensor restarted and reporting](images/member-c/acceptance-17.png)
+
+### Figure 18: Invalid HTTP request rejected
+
+The complete screenshot shows the POST command, HTTP 400 Bad Request, and the server response `{"error": "invalid command"}`. It provides more complete evidence than the earlier header-only screenshot, which is not duplicated here. The submitted value was intended to be the string `"true"` rather than a boolean. Because Windows PowerShell 5.1 may alter quotation marks passed to native executables, this image establishes rejection of an invalid request, but does not isolate boolean-type validation from JSON parsing validation.
+
+The red PowerShell ParserError below the response occurred when the response JSON was subsequently entered as a shell command. It is separate from the HTTP response and does not indicate a server crash. This evidence does not verify a device execution failure or confirmation timeout.
+
+![Figure 18: Invalid HTTP request rejected](images/member-c/acceptance-18.png)
+
+## Remaining acceptance checks
+
+- Capture a new successful light command after the isolated light restart and complete an isolated lock restart/control cycle. Reconnection/control after the earlier gateway interruption is already evidenced in Figures 8-9.
+- If required, record a short two-page video showing an automatic state transition without refreshing either page; Figure 10 records a matching snapshot.
+- Open `/api/devices` and compare returned states with the UI.
+- Capture executing, failed and unknown results using supported reproducible fault injection. Coordinate with device/reliability owners where necessary.
+
+Log persistence/query remains a separate member's responsibility. No missing log data is fabricated. Only observed screenshot outcomes are recorded; no new automated test run was performed for this documentation-only update.
