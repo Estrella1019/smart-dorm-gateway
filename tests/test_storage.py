@@ -123,6 +123,23 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.15)
         self.assertGreaterEqual(self.store.count_events(), 1)
 
+    async def test_writer_uses_one_thread_and_start_is_ready(self):
+        import threading
+        self.assertEqual(self.store.count_events(), 0)
+        writer_thread = await asyncio.get_running_loop().run_in_executor(
+            self.store._executor, threading.get_ident)
+        threads = []
+        original = self.store._insert
+        def insert(event):
+            threads.append(threading.get_ident())
+            return original(event)
+        with patch.object(self.store, "_insert", side_effect=insert):
+            for i in range(20):
+                self.store.enqueue({"event": "device.state", "device_id": str(i)})
+            await self.store.close()
+        self.assertEqual(self.store.count_events(), 20)
+        self.assertEqual(set(threads), {writer_thread})
+
 
 if __name__ == "__main__":
     unittest.main()

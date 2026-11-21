@@ -7,6 +7,7 @@ Database I/O runs in a worker thread so the asyncio loop is not blocked.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import sqlite3
@@ -82,7 +83,7 @@ class EventLogStore:
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._conn: sqlite3.Connection | None = None
-        self._writer_ready = asyncio.Event()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="event-log")
 
     def enqueue(self, event: dict) -> None:
         name = event.get("event")
@@ -117,7 +118,7 @@ class EventLogStore:
     async def start(self) -> None:
         if self._task is not None:
             return
-        self._writer_ready.clear()
+        self._conn = await asyncio.get_running_loop().run_in_executor(self._executor, self._open_writer)
         self._task = asyncio.create_task(self._writer_loop())
 
     async def drain_and_close(self, timeout: float = 5.0) -> None:
@@ -145,19 +146,17 @@ class EventLogStore:
 
     async def _writer_loop(self) -> None:
         try:
-            self._conn = await asyncio.to_thread(self._open_writer)
-            self._writer_ready.set()
             while True:
                 event = await self._queue.get()
                 if event is None:
                     break
                 try:
-                    await asyncio.to_thread(self._insert, event)
+                    await asyncio.get_running_loop().run_in_executor(self._executor, self._insert, event)
                 except Exception:
                     LOG.exception("failed to persist event %s", event.get("event"))
         finally:
             if self._conn:
-                await asyncio.to_thread(self._conn.close)
+                await asyncio.get_running_loop().run_in_executor(self._executor, self._conn.close)
                 self._conn = None
 
     def _read(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:

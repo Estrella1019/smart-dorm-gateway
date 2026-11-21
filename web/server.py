@@ -74,12 +74,12 @@ def create_app(gateway, log_store: EventLogStore | None = None):
             return web.json_response({'error': 'logging disabled'}, status=503)
         request_id = request.rel_url.query.get('request_id')
         if request_id:
-            rows = log_store.query_by_request_id(request_id)
+            rows = await asyncio.to_thread(log_store.query_by_request_id, request_id)
         else:
             limit = parse_query_limit(request.rel_url.query.get('limit'))
             if limit is None:
                 return web.json_response({'error': 'invalid limit'}, status=400)
-            rows = log_store.query_recent(
+            rows = await asyncio.to_thread(log_store.query_recent,
                 limit=limit,
                 device_id=request.rel_url.query.get('device_id'),
                 event_name=request.rel_url.query.get('event'),

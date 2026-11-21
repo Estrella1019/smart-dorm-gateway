@@ -59,6 +59,9 @@ class HeartbeatTests(unittest.IsolatedAsyncioTestCase):
             result = await request(self.host, self.port, make_message(
                 "COMMAND", {"action": "set_power", "value": value}, device_id="light_001"))
             self.assertEqual(result["payload"]["status"], "success")
+        async with asyncio.timeout(2):
+            while not self.heartbeats:
+                await asyncio.sleep(0.005)
         self.assertTrue(self.heartbeats)
 
     async def test_zero_interval_disables_heartbeats(self):
