@@ -3,9 +3,13 @@
 import argparse
 import asyncio
 import json
+import os
 import random
+import socket
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 
 from shared.config import load_settings
 from shared.protocol import ProtocolError, close_writer, make_message, read_message, send_message
@@ -38,11 +42,13 @@ def _raise_if_cancelling() -> None:
 
 class TcpDevice:
     device_type = ""
+    state_field: str
     dedup_size = 100
 
     def __init__(self, device_id: str):
         self.device_id = device_id
-        # The heartbeat task and command loop share one writer; keep frames whole.
+        self._state_file: Path | None = None
+        # Heartbeats, reports, and command results share one writer.
         self._send_lock = asyncio.Lock()
         self.registered = False
         # request_id -> result payload, oldest first. Kept across reconnects so a
@@ -58,16 +64,80 @@ class TcpDevice:
         """Apply one command to the in-memory state; return False to reject it."""
         raise NotImplementedError
 
+    def load_state(self, state: dict) -> None:
+        """Restore a snapshot after validating the device-specific fields."""
+        raise NotImplementedError
+
+    def _boolean_field(self, state: dict) -> bool:
+        if not isinstance(state, dict) or type(state.get(self.state_field)) is not bool:
+            raise ValueError(f"state.{self.state_field} must be boolean")
+        return state[self.state_field]
+
+    def attach_state_file(self, path: str | Path) -> None:
+        path = Path(path)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self._state_file = path
+            return
+
+        try:
+            snapshot = json.loads(raw)
+            if not isinstance(snapshot, dict):
+                raise ValueError("expected a JSON object")
+            for key in ("device_type", "device_id"):
+                if snapshot.get(key) != getattr(self, key):
+                    raise ValueError(f"{key} mismatch")
+            records = snapshot.get("recent_results")
+            if not isinstance(records, dict):
+                raise ValueError("recent_results must be an object")
+            recent = OrderedDict()
+            for request_id, result in records.items():
+                if not isinstance(result, dict) or result.get("status") not in ("success", "failed"):
+                    raise ValueError("invalid cached command result")
+                self._boolean_field(result.get("state"))
+                recent[request_id] = result
+                if len(recent) > self.dedup_size:
+                    recent.popitem(last=False)
+            self.load_state(snapshot.get("state"))
+        except ValueError as exc:
+            raise ValueError(f"Invalid state file {path}: {exc}") from exc
+        self._recent_results = recent
+        self._state_file = path
+
+    def _save_state(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {"device_id": self.device_id, "device_type": self.device_type,
+                    "state": self.state(), "recent_results": self._recent_results}
+        temp = tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False)
+        try:
+            with temp:
+                json.dump(snapshot, temp)
+            os.replace(temp.name, path)
+        finally:
+            Path(temp.name).unlink(missing_ok=True)
+
     def handle_command(self, request_id: str, payload: dict) -> tuple[dict, bool]:
         """Return (result payload, is_duplicate); a repeated request_id is not re-executed."""
         cached = self._recent_results.get(request_id)
         if cached is not None:
+            self._recent_results.move_to_end(request_id)
             return dict(cached), True
+        if self._state_file is not None:
+            previous_state = self.state()
+            previous_results = self._recent_results.copy()
         status = "success" if self.execute(payload.get("action"), payload.get("value")) else "failed"
         result = {"status": status, "state": self.state()}
         self._recent_results[request_id] = result
         if len(self._recent_results) > self.dedup_size:
             self._recent_results.popitem(last=False)
+        if self._state_file is not None:
+            try:
+                self._save_state(self._state_file)
+            except OSError:
+                self.load_state(previous_state)
+                self._recent_results = previous_results
+                raise
         return dict(result), False
 
     async def _send(self, writer: asyncio.StreamWriter, message: dict) -> None:
@@ -78,6 +148,23 @@ class TcpDevice:
         while True:
             await asyncio.sleep(interval)
             await self._send(writer, make_message("HEARTBEAT", device_id=self.device_id))
+
+    async def _report_loop(self, writer: asyncio.StreamWriter, interval: float) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            await self._send(writer, make_message("REPORT", {"state": self.state()},
+                                                  device_id=self.device_id))
+
+    @staticmethod
+    def _configure_socket(writer: asyncio.StreamWriter) -> None:
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            for level, option in ((socket.IPPROTO_TCP, socket.TCP_NODELAY),
+                                  (socket.SOL_SOCKET, socket.SO_KEEPALIVE)):
+                try:
+                    sock.setsockopt(level, option, 1)
+                except OSError:
+                    pass
 
     async def _serve_commands(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
@@ -103,11 +190,15 @@ class TcpDevice:
             await self._send(writer, result)
             print(json.dumps(result, ensure_ascii=False), flush=True)
 
-    async def run(self, host: str, port: int, heartbeat_interval: float = 5.0) -> None:
+    async def run(self, host: str, port: int, heartbeat_interval: float = 5.0,
+                  report_interval: float = 0.0) -> None:
         """heartbeat_interval <= 0 disables heartbeats."""
+        if report_interval < 0:
+            raise ValueError("report_interval must not be negative")
         reader, writer = await asyncio.open_connection(host, port)
-        heartbeat = None
+        tasks = []
         try:
+            self._configure_socket(writer)
             await send_message(writer, make_message(
                 "REGISTER", {"device_type": self.device_type, "state": self.state()},
                 device_id=self.device_id,
@@ -120,7 +211,9 @@ class TcpDevice:
             print(f"Simulated {self.device_type} {self.device_id} connected; "
                   f"state={json.dumps(self.state())}", flush=True)
             if heartbeat_interval > 0:
-                heartbeat = asyncio.create_task(self._heartbeat(writer, heartbeat_interval))
+                tasks.append(asyncio.create_task(self._heartbeat(writer, heartbeat_interval)))
+            if report_interval > 0:
+                tasks.append(asyncio.create_task(self._report_loop(writer, report_interval)))
             faults = self.faults
             deadline = (asyncio.get_running_loop().time() + faults.disconnect_after
                         if faults.disconnect_after else None)
@@ -133,29 +226,31 @@ class TcpDevice:
                 print(f"fault: dropping connection after {faults.disconnect_after:g}s", flush=True)
                 raise ConnectionResetError("fault: disconnect_after") from None
         finally:
-            if heartbeat:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await close_writer(writer)
 
     async def run_forever(self, host: str, port: int, heartbeat_interval: float = 5.0,
-                          retry_initial: float = 1.0, retry_max: float = 30.0) -> None:
+                          retry_initial: float = 1.0, retry_max: float = 30.0,
+                          report_interval: float = 0.0, retry_jitter: bool = True) -> None:
         """Reconnect with exponential backoff; in-memory state survives reconnects."""
         delay = retry_initial
         while True:
             self.registered = False
             reason = "connection closed"
             try:
-                await self.run(host, port, heartbeat_interval)
+                await self.run(host, port, heartbeat_interval, report_interval)
             except RETRYABLE_ERRORS as exc:
                 reason = str(exc) or type(exc).__name__
             _raise_if_cancelling()
             if self.registered:
                 # The last attempt got through, so start the backoff over.
                 delay = retry_initial
+            wait = self.rng.uniform(delay * 0.5, delay) if retry_jitter else delay
             print(f"{self.device_type} {self.device_id} disconnected ({reason}); "
-                  f"retrying in {delay:g}s", flush=True)
-            await asyncio.sleep(delay)
+                  f"retrying in {wait:g}s", flush=True)
+            await asyncio.sleep(wait)
             delay = min(delay * 2, retry_max)
 
 
@@ -166,6 +261,10 @@ def run_device_cli(device_class: type[TcpDevice], description: str, default_id: 
     parser.add_argument("--device-id", default=default_id)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0,
                         help="Seconds between heartbeats; 0 disables them")
+    parser.add_argument("--report-interval", type=float, default=0.0,
+                        help="Seconds between state reports for gateway reconciliation; 0 disables them")
+    parser.add_argument("--state-file", default=None, help="Optional JSON file for state and command results")
+    parser.add_argument("--no-retry-jitter", action="store_true", help="Use fixed exponential retry delays")
     parser.add_argument("--retry-max", type=float, default=30.0,
                         help="Longest wait between reconnect attempts, in seconds")
     parser.add_argument("--no-reconnect", action="store_true",
@@ -181,13 +280,16 @@ def run_device_cli(device_class: type[TcpDevice], description: str, default_id: 
     try:
         settings = load_settings(args.config)
         device = device_class(args.device_id)
+        if args.state_file is not None:
+            device.attach_state_file(args.state_file)
         device.faults = Faults(args.delay, args.drop_ack, args.disconnect_after)
         host = args.host or settings.host
         if args.no_reconnect:
-            asyncio.run(device.run(host, settings.tcp_port, args.heartbeat_interval))
+            asyncio.run(device.run(host, settings.tcp_port, args.heartbeat_interval, args.report_interval))
         else:
             asyncio.run(device.run_forever(host, settings.tcp_port, args.heartbeat_interval,
-                                           retry_max=args.retry_max))
+                                           retry_max=args.retry_max, report_interval=args.report_interval,
+                                           retry_jitter=not args.no_retry_jitter))
     except KeyboardInterrupt:
         pass
     except (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError) as exc:

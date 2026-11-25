@@ -1,10 +1,11 @@
-"""One simulated light. State is in memory; hardware is not required."""
+"""One simulated light. No hardware required."""
 
 from devices.base import TcpDevice, run_device_cli
 
 
 class Light(TcpDevice):
     device_type = "light"
+    state_field = "power"
 
     def __init__(self, device_id: str):
         super().__init__(device_id)
@@ -13,6 +14,9 @@ class Light(TcpDevice):
     def state(self) -> dict:
         return {"power": self.power}
 
+    def load_state(self, state: dict) -> None:
+        self.power = self._boolean_field(state)
+
     def execute(self, action: object, value: object) -> bool:
         if action == "set_power" and type(value) is bool:
             self.power = value
@@ -20,8 +24,9 @@ class Light(TcpDevice):
         return False
 
 
-async def run_light(host: str, port: int, device_id: str, heartbeat_interval: float = 5.0) -> None:
-    await Light(device_id).run(host, port, heartbeat_interval)
+async def run_light(host: str, port: int, device_id: str, heartbeat_interval: float = 5.0,
+                    report_interval: float = 0.0) -> None:
+    await Light(device_id).run(host, port, heartbeat_interval, report_interval)
 
 
 def main() -> None:

@@ -17,15 +17,16 @@ from shared.protocol import make_message
 
 WORK.mkdir(parents=True, exist_ok=True)
 CFG = WORK / "acceptance.toml"
-CFG.write_text('[gateway]\nhost = "127.0.0.1"\ntcp_port = 19000\nudp_port = 19001\n'
-               'command_timeout = 3.0\nheartbeat_timeout = 4.0\n')
+CONFIG_TEMPLATE = ('[gateway]\nhost = "127.0.0.1"\ntcp_port = 19000\nudp_port = 19001\n'
+               'command_timeout = {timeout}\nheartbeat_timeout = 4.0\n')
+CFG.write_text(CONFIG_TEMPLATE.format(timeout=3.0))
 PY = sys.executable
 procs, results = {}, []
 
 
-def start(name, *args):
+def start(name, *args, config=CFG):
     log = open(WORK / f"{name}.log", "w")
-    procs[name] = subprocess.Popen([PY, "-u", "-m", *args, "--config", str(CFG)], cwd=REPO,
+    procs[name] = subprocess.Popen([PY, "-u", "-m", *args, "--config", str(config)], cwd=REPO,
                                    stdout=log, stderr=subprocess.STDOUT)
 
 
@@ -75,7 +76,7 @@ def online(d, dev):
 
 
 async def main():
-    start("gateway", "gateway.server"); await asyncio.sleep(1)
+    start("gateway", "gateway.server", "--log-db", str(WORK / "events.sqlite")); await asyncio.sleep(1)
     start("light", "devices.light", "--heartbeat-interval", "1")
     start("lock", "devices.door_lock", "--heartbeat-interval", "1")
     start("sensor", "devices.sensor", "--interval", "1")
@@ -118,7 +119,7 @@ async def main():
     # 3. Gateway restart
     await command("lock_001", "set_locked", False)
     stop("gateway"); await asyncio.sleep(3)
-    start("gateway", "gateway.server")
+    start("gateway", "gateway.server", "--log-db", str(WORK / "events.sqlite"))
     back = await wait_for(lambda d: all(online(d, x) for x in ("light_001", "lock_001", "sensor_001")), 40)
     d = await devices()
     record("网关重启后自动恢复", back and d["light_001"]["state"] == {"power": True}
@@ -183,11 +184,29 @@ async def main():
 
     for n in list(procs):
         stop(n)
+    # 14th check: exhaust three confirmation attempts before the first 2s report.
+    report_config = WORK / "report.toml"
+    report_config.write_text(CONFIG_TEMPLATE.format(timeout=0.2))
+    start("report_gateway", "gateway.server", "--log-db", "", config=report_config)
+    start("report_light", "devices.light", "--drop-ack", "1", "--report-interval", "2",
+          config=report_config)
+    ready = await wait_for(lambda d: online(d, "light_001") and d["light_001"]["state"] == {"power": False})
+    result = await command("light_001", "set_power", True)
+    before = (await devices())["light_001"]["state"]
+    corrected = await wait_for(lambda d: online(d, "light_001") and d["light_001"]["state"] == {"power": True}, 5)
+    record("主动 REPORT 纠正丢失确认后的状态",
+           ready and result["status"] == "unknown" and before == {"power": False} and corrected,
+           f"命令返回 {result['status']} 时状态为 {before}，随后网关看到开灯={corrected}")
+
+    for n in list(procs):
+        stop(n)
     (WORK / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=1))
 
 
 try:
     asyncio.run(main())
+    if not all(result["ok"] for result in results):
+        sys.exit(1)
 finally:
     for p in procs.values():
         p.kill()
