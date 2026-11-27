@@ -1,7 +1,6 @@
 import asyncio
 import json
 import random
-import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,13 +51,6 @@ class ReportTests(unittest.IsolatedAsyncioTestCase):
         await self.connect(0)
         await asyncio.sleep(0.1)
         self.assertEqual(updates, [])
-
-    async def test_real_client_socket_options(self):
-        with patch.object(self.light, "_configure_socket", wraps=self.light._configure_socket) as configure:
-            await self.connect(0)
-        sock = configure.call_args.args[0].get_extra_info("socket")
-        self.assertTrue(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
-        self.assertTrue(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE))
 
     async def test_negative_interval_rejected(self):
         for run in (self.light.run, self.light.run_forever):

@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import random
-import socket
 import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -155,17 +154,6 @@ class TcpDevice:
             await self._send(writer, make_message("REPORT", {"state": self.state()},
                                                   device_id=self.device_id))
 
-    @staticmethod
-    def _configure_socket(writer: asyncio.StreamWriter) -> None:
-        sock = writer.get_extra_info("socket")
-        if sock is not None:
-            for level, option in ((socket.IPPROTO_TCP, socket.TCP_NODELAY),
-                                  (socket.SOL_SOCKET, socket.SO_KEEPALIVE)):
-                try:
-                    sock.setsockopt(level, option, 1)
-                except OSError:
-                    pass
-
     async def _serve_commands(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
             message = await read_message(reader)
@@ -198,7 +186,6 @@ class TcpDevice:
         reader, writer = await asyncio.open_connection(host, port)
         tasks = []
         try:
-            self._configure_socket(writer)
             await send_message(writer, make_message(
                 "REGISTER", {"device_type": self.device_type, "state": self.state()},
                 device_id=self.device_id,
